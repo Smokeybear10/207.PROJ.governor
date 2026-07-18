@@ -1,4 +1,4 @@
-# TokenGovernor
+# Governor
 
 > The budget-aware execution layer for AI agents.
 
@@ -10,17 +10,18 @@
 calculated API cost across all assigned jobs  
 **Prediction status:** Shadow-only until it beats the same controller without
 prediction  
-**Repository status:** The deterministic enforcement POC described in this
-document is implemented and the multi-step review workflow is tested through a
-scripted fake provider. The dashboard is a deterministic scripted mechanism
-walkthrough using synthetic fixtures; no live OpenAI call, measured benchmark,
-or savings result exists. The ledger and active workflow state are
-single-process memory, not durable or cross-process safe.
+**Repository status:** The primary POC customer experience is the terminal CLI
+and versioned governed-jobs API. The deterministic enforcement path is
+implemented, and the multi-step review workflow is tested through a scripted
+fake provider. The optional dashboard is a deterministic mechanism walkthrough
+using synthetic fixtures; no live OpenAI call, measured benchmark, or savings
+result exists. The ledger and active workflow state are single-process memory,
+not durable or cross-process safe.
 See `docs/POC_FINDINGS.md` for the implemented boundary and adversarial verdict.
 
 ## 1. Executive Overview
 
-TokenGovernor is a budget-aware runtime for multi-step AI jobs. Its safety layer
+Governor is a budget-aware runtime for multi-step AI jobs. Its safety layer
 counts the next request, reserves a conservative worst-case amount before
 dispatch, allows only one model response in flight, settles the reservation
 from provider-reported usage, and applies deterministic controls to context,
@@ -36,12 +37,12 @@ The central distinction is:
 
 - A hard cap stops an agent when no safe next call fits.
 - Static controls always apply the same retry and context rules.
-- TokenGovernor aims to apply the right control only when the job needs it, so
+- Governor aims to apply the right control only when the job needs it, so
   more work finishes inside the same budget policy.
 
 In the implemented fake-provider workflow, a pull-request review receives a
 preset task-class policy rather than a user-entered penny-scale budget. Before
-each scripted response, TokenGovernor counts the input, reserves the maximum
+each scripted response, Governor counts the input, reserves the maximum
 permitted output cost, and preserves a final-answer reserve. When a test
 returns a large log, a deterministic reducer keeps the exit code, failing
 tests, relevant error lines, and an artifact hash instead of inserting the
@@ -64,14 +65,14 @@ steps. Counting the first prompt does not reveal the cost of the complete job,
 and provider usage is normally final for a response only after that response
 returns.
 
-TokenGovernor puts a controlled boundary around every call:
+Governor puts a controlled boundary around every call:
 
 ```text
 Team cost policy + user task
             |
             v
 +-----------------------------------+
-|          TokenGovernor            |
+|          Governor            |
 |                                   |
 |  Safety layer                     |
 |  count -> reserve -> cap -> settle|
@@ -102,14 +103,14 @@ Before and after each model response, it asks:
 
 ### One sentence
 
-TokenGovernor helps more AI-agent jobs finish under the same cost policy by
+Governor helps more AI-agent jobs finish under the same cost policy by
 reserving every model call and adapting expensive context and retries before a
 hard cap stops the work.
 
 ### Thirty seconds
 
 AI-agent costs grow across multiple model calls, tools, retries, and expanding
-context. TokenGovernor reserves the worst-case cost of each request before it
+context. Governor reserves the worst-case cost of each request before it
 runs, settles reported usage afterward, and safely reduces large tool output or
 repeated work when a job becomes risky. The current demo is a deterministic
 scripted comparison, not a live benchmark. Quality must clear a real fixed
@@ -117,7 +118,7 @@ holdout gate before any savings claim is shown.
 
 ### High-level paragraph
 
-TokenGovernor is a budget-aware runtime for one controlled AI workflow. It
+Governor is a budget-aware runtime for one controlled AI workflow. It
 turns a team-level cost policy into safe per-call reservations, deterministic
 context and retry controls, and an auditable execution trace. A lightweight
 forecast initially runs in shadow mode and is promoted only if it helps more
@@ -243,7 +244,7 @@ failure remediation rather than the value of saving a few cents on one review.
 
 Before experiments, the only safe claim is:
 
-> In fake-provider tests, TokenGovernor enforces a conservative
+> In fake-provider tests, Governor enforces a conservative
 > application-level cost policy for a restricted Responses-style workflow and
 > records a shadow risk signal that cannot change execution.
 
@@ -283,19 +284,44 @@ Do not claim:
 
 ### 8.1 Main workflow
 
-1. The user selects a pull request.
-2. TokenGovernor applies the preset `Routine PR Review` policy.
-3. The runtime counts and reserves the first request.
-4. A scripted timeline displays reservations, response fixtures, and local
-   tool events.
-5. Synthetic settled usage and remaining unreserved capacity update after each
-   response.
-6. The risk layer displays `SAFE`, `WATCH`, or `AT_RISK`.
-7. Deterministic controls reduce large output or reject equivalent retries.
-8. A shadow forecast records what it would have changed.
-9. The result compares hard-cap, static, and predictive-controller runs.
+1. A developer creates a governed job from the CLI or `POST /v1/jobs` with an
+   exact decimal-string budget.
+2. Governor returns the job ID, pinned pricing identity, protected final
+   reserve, and currently available work budget.
+3. The agent sends each Responses request through
+   `POST /v1/jobs/:jobId/responses`, with a job-scoped `request_id` and a
+   `work` or `final` phase.
+4. The runtime counts, reserves, caps, and dispatches against the same job
+   ledger; valid terminal usage settles the reservation.
+5. The developer retrieves a stored response with
+   `GET /v1/jobs/:jobId/responses/:requestId` and inspects exact accounting
+   with the CLI or `GET /v1/jobs/:jobId`.
+6. A genuine post-dispatch ambiguity remains fully reserved and moves the job
+   to `reconciliation_required`; no further request is safe until it is
+   reconciled.
+7. A completed final response moves to `validation_required`; the application
+   explicitly accepts or rejects it before the job closes.
+8. For a no-key demonstration, the CLI can play the separately labeled
+   synthetic PR-review scenarios and the dashboard can visualize the same
+   fixtures.
 
-### 8.2 Example visible state
+### 8.2 Request identity and retrieval
+
+`request_id` is an idempotency key within one job. The service fingerprints the
+canonical request context, phase, requested output cap, and admission floor.
+Concurrent identical submissions share one provider dispatch; a later
+identical `POST` replays the stored outcome. Reusing the ID for a different
+intent returns `409 REQUEST_ID_CONFLICT`.
+
+The response `GET` route returns `200` with the stored execution and current
+job state, without dispatching again. If the original `POST` returned an
+unresolved `202`, repeating that `POST` returns the same unresolved outcome and
+the `GET` reports its unresolved execution. Neither is permission to retry.
+The worst-case reservation remains committed until provider reconciliation.
+The current HTTP and CLI surface has no reconciliation operation, so that job
+remains locked in the running process.
+
+### 8.3 Example visible state
 
 ```text
 Task policy              Routine PR Review
@@ -320,12 +346,14 @@ Deterministic action
 All dollar values in the current demo are synthetic list-price calculations
 from fixture usage, not measured usage, invoice amounts, or savings.
 
-### 8.3 Required states
+### 8.4 Required states
 
 - Ready
 - Admitting request
 - Running one response
 - Settling usage
+- Reconciliation required
+- Final validation required
 - Safe
 - Watch
 - At risk
@@ -342,31 +370,30 @@ Replay and live data must never be visually ambiguous.
 ## 9. Technical Architecture
 
 ```text
-React dashboard
-    |
-    | snapshots and streamed trace events
-    v
-TokenGovernor API
-    |
-    |-- Job orchestrator
-    |-- Responses API adapter
-    |-- Input-token preflight
-    |-- Versioned list-price calculator
-    |-- Single-process reservation ledger
-    |-- Deterministic safety controller
-    |-- Shadow risk estimator
-    |-- Local tool-output reducer
-    |-- Trace manifest
-    `-- Independent evaluation runner
+Terminal CLI / HTTP client
             |
-            +--> One in-flight Responses API call
-            +--> Read-only local repository tools
-            `--> Sealed benchmark ground truth
+            v
+Versioned governed-jobs API
+            |
+            v
+Input preflight -> reservation ledger -> one Responses API call
+            ^
+            |
+Built-in PR-review workflow <-> read-only local repository tools
+
+Optional React dashboard -> synthetic demo API and fixtures
 ```
 
 ### 9.1 Components
 
-**Job orchestrator**
+**Governed jobs service**
+
+- Creates and inspects in-memory ledgers.
+- Submits, fingerprints, stores, and retrieves governed response outcomes.
+- Requires explicit application validation of a completed final response.
+- Does not run a tool loop or enforce equivalent-tool retry policy.
+
+**Built-in PR-review orchestrator**
 
 - Owns the fixed job phases.
 - Allows only one model response in flight per job.
@@ -385,10 +412,11 @@ TokenGovernor API
 
 - Calculates each request's maximum supported list-price charge.
 - Reserves that amount before dispatch.
-- Retains the reservation after ambiguous timeouts.
+- Retains the full reservation after genuine post-dispatch ambiguity.
 - Settles only when terminal usage is available.
 - Is synchronous in-process memory in the POC; it has no restart durability or
-  cross-process transaction boundary.
+  cross-process transaction boundary. Its reconciliation method is not exposed
+  by the current HTTP or CLI surface.
 
 **Usage and price calculator**
 
@@ -439,7 +467,7 @@ the loop. The MVP should:
 - Disable automatic retries.
 - Settle from terminal provider usage.
 
-The API provides token controls, not a dollar budget. TokenGovernor translates
+The API provides token controls, not a dollar budget. Governor translates
 a pinned rate card into a conservative application-level list-price ceiling.
 
 ### 10.2 Codex boundary
@@ -550,12 +578,16 @@ The task-class policy contains:
 
 - `applicationCeiling`: Maximum calculated list-price cost for the job.
 - `finalAnswerReserve`: Amount protected for completion or handoff.
+- `minimumFinalOutputTokens`: Admission floor protected for a final response.
 - `maxResponses`: Maximum number of model responses.
-- `maxEquivalentRetries`: Maximum equivalent retry count.
+- `maxEquivalentRetries`: Equivalent-tool retry limit for the built-in
+  PR-review workflow.
 - `rateCardVersion`: Rates used for every admission decision.
 
-The policy is assigned automatically by task class. It is not chosen by the
-person submitting each pull request.
+The PR-review workflow receives this policy by task class. The generic
+`POST /v1/jobs` API instead accepts a caller-supplied budget and selected policy
+fields. It does not expose `maxEquivalentRetries` because
+`POST /v1/jobs/:jobId/responses` cannot classify equivalent workflow retries.
 
 ### 11.6 Request reservation
 
@@ -580,12 +612,19 @@ maximum output tokens =
   floor((available - known input ceiling) / output token rate)
 ```
 
-Only one response may be in flight. An ambiguous timeout keeps its reservation
-until the provider result is reconciled or the job stops. Automatic network
-retries are disabled.
+`minimum_output_tokens` is an admission capacity floor, not a generation
+length guarantee. If the budget-adjusted output cap is below the floor, the
+request is denied before dispatch. Otherwise, only `max_output_tokens` is sent
+to the provider, which may generate fewer tokens.
+
+Only one response may be in flight. After dispatch, a transport, protocol, or
+usage ambiguity keeps the full reservation and requires provider
+reconciliation. Repeating the same `request_id` only returns the stored
+unresolved outcome; it never redispatches. Automatic network retries are
+disabled.
 
 This is an application-level ceiling under pinned public pricing. It is not a
-claim that TokenGovernor controls the provider invoice.
+claim that Governor controls the provider invoice.
 
 ## 12. Event and Data Model
 
@@ -855,7 +894,7 @@ Observed drivers explain the risk decision; they do not establish causation.
 This is also the practical lesson from work distinguishing decodable signals
 from causally used representations: a feature can be easy to recover without
 being the mechanism that drives behavior. That paper can inform ablations and
-intervention design, but it does not validate TokenGovernor's risk model.
+intervention design, but it does not validate Governor's risk model.
 
 ## 14. Governor Policy
 
@@ -1005,7 +1044,7 @@ use the reserve for a bounded final handoff only when it fits.
 
 Native compaction is useful for long-running workflows, but its encrypted
 compaction item is opaque and the returned canonical window must be passed
-forward as-is. TokenGovernor therefore cannot inspect it to prove that every
+forward as-is. Governor therefore cannot inspect it to prove that every
 critical fact survived.
 
 Do not use native compaction as the primary hackathon intervention or quality
@@ -1139,7 +1178,7 @@ tasks and repetitions.
 - Keep holdout pull requests out of predictor training.
 - Do not tune intervention thresholds on the final holdout.
 - Version prompts and tools.
-- Keep the quality evaluator independent from TokenGovernor's forecast.
+- Keep the quality evaluator independent from Governor's forecast.
 - Prefer deterministic ground truth over an LLM grading its own work.
 
 ## 17. Hackathon Dataset
@@ -1335,7 +1374,7 @@ occurring.
 
 The agent reads the diff, searches the repository, and runs tests.
 
-> "TokenGovernor counted and reserved each request before it ran. After this
+> "Governor counted and reserved each request before it ran. After this
 > large test result, the risk band moved to AT_RISK because context grew and
 > the same failing test path is being retried."
 
@@ -1567,19 +1606,20 @@ Out of scope for the hackathon, but a production system needs:
 
 ## 26. Reliability and Failure Handling
 
-### Provider timeout
+### Post-dispatch ambiguity
 
 - Mark the request ambiguous.
 - Record any usage returned.
 - Retain its full reservation.
-- Do not retry until provider state is reconciled.
+- Set the job to `reconciliation_required` and do not retry.
+- Reconcile against provider evidence before releasing or settling it. The
+  current public API does not expose this operation.
 
 ### Missing usage
 
-- Mark settled cost as unknown.
-- Do not display it as measured.
+- Do not settle or display the request as measured cost.
 - Keep the worst-case reservation charged against the job.
-- Stop because safe admission is no longer possible.
+- Require reconciliation and block further admission.
 
 ### Tool failure
 
@@ -1627,7 +1667,7 @@ Out of scope for the hackathon, but a production system needs:
 
 ## 28. Competitive Differentiation
 
-| Product type | What it does | What TokenGovernor adds |
+| Product type | What it does | What Governor adds |
 | --- | --- | --- |
 | Token counter | Estimates prompt or response size | Admits and settles every request inside a job policy |
 | Cost dashboard | Reports historical usage | Changes future execution before the next paid call |
@@ -1638,14 +1678,14 @@ Out of scope for the hackathon, but a production system needs:
 
 The concise contrast is:
 
-> Dashboards explain yesterday. Hard caps stop today. TokenGovernor steers the
+> Dashboards explain yesterday. Hard caps stop today. Governor steers the
 > job before it fails.
 
 ## 29. Ramp Relevance
 
 Ramp transaction data can identify vendors, cards, owners, teams, and spending
 trends. It generally cannot reveal which model request, retry, or tool result
-caused a particular AI workflow to become expensive. TokenGovernor therefore
+caused a particular AI workflow to become expensive. Governor therefore
 needs application telemetry from the workflow itself.
 
 A credible discovery path is:
@@ -1653,7 +1693,7 @@ A credible discovery path is:
 1. Use Ramp spend data to identify a team with material and growing AI vendor
    spend.
 2. Ask that team to instrument one centrally owned, high-volume workflow.
-3. Join sanitized TokenGovernor job summaries to the team, application, and
+3. Join sanitized Governor job summaries to the team, application, and
    vendor already visible in finance data.
 4. Let finance define the envelope while engineering owns task policy and
    quality.
@@ -1664,7 +1704,7 @@ trace identifier. Prompts, source code, test logs, and secrets stay out.
 
 The strategic story is:
 
-> Ramp finds where AI money is going. TokenGovernor gives the workflow that
+> Ramp finds where AI money is going. Governor gives the workflow that
 > creates that spend a preventative control loop.
 
 ## 30. Judge Questions
@@ -1672,7 +1712,7 @@ The strategic story is:
 ### Is this just a maximum-token setting?
 
 No. A maximum-token setting controls one response. An AI job may contain many
-responses, tools, retries, and growing context. TokenGovernor admits each
+responses, tools, retries, and growing context. Governor admits each
 request against a job-level policy, settles actual usage, protects final-answer
 capacity, and changes later execution.
 
@@ -1918,7 +1958,7 @@ POC, not after the dashboard is polished.
 
 ## 36. Final Recommendation
 
-TokenGovernor now demonstrates a narrow deterministic control loop for one AI
+Governor now demonstrates a narrow deterministic control loop for one AI
 workflow through fake-provider tests and a scripted dashboard:
 
 ```text

@@ -67,7 +67,7 @@ function canonicalize(
       throw new OpenAiApiError(`${path} must contain plain JSON objects.`);
     }
 
-    const result: Record<string, CanonicalJson> = {};
+    const result = Object.create(null) as Record<string, CanonicalJson>;
     for (const key of Object.keys(value).sort()) {
       result[key] = canonicalize(
         (value as Record<string, unknown>)[key],
@@ -143,13 +143,9 @@ export function prepareResponseContext(
   ) {
     throw new OpenAiApiError("Response instructions must be a string.");
   }
-  if (
-    context.previous_response_id !== undefined &&
-    (typeof context.previous_response_id !== "string" ||
-      !context.previous_response_id.trim())
-  ) {
+  if (context.previous_response_id !== undefined) {
     throw new OpenAiApiError(
-      "previous_response_id must be a non-empty string."
+      "The governed runtime does not permit previous_response_id."
     );
   }
   if (
@@ -168,9 +164,6 @@ export function prepareResponseContext(
       ? {}
       : { instructions: context.instructions }),
     ...(context.tools === undefined ? {} : { tools: context.tools }),
-    ...(context.previous_response_id === undefined
-      ? {}
-      : { previous_response_id: context.previous_response_id }),
     service_tier: "default" as const
   };
   const document = canonicalDocument(candidate, "response context");

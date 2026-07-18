@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   DEMO_PROVENANCE,
   DEMO_RATE_CARD,
@@ -7,6 +8,18 @@ import {
   type RunBlueprint,
   type UsageSeed
 } from "./fixtures.js";
+import {
+  GPT_5_4_MINI_STANDARD_RATE_CARD,
+  ReservationLedger,
+  RetryFingerprintTracker,
+  assessLedgerRisk,
+  calculateUsageCost,
+  createGovernorPolicy,
+  type LedgerSnapshot,
+  type ProviderUsage,
+  type RiskAssessment,
+  type RiskDriverCode
+} from "../governor/index.js";
 import {
   DEMO_CONTROLLERS,
   DEMO_MODE,
@@ -22,8 +35,10 @@ import {
   type DemoController,
   type DemoScenario,
   type DemoScenarioId,
+  type DemoRequestAdmission,
   type EventMetricsSnapshot,
   type InterventionActionKind,
+  type ObservedRiskDriver,
   type RunEvent,
   type RunFinalSummary,
   type RunTrace,
@@ -32,25 +47,12 @@ import {
 
 export * from "./types.js";
 
-const TOKENS_PER_RATE_UNIT = 1_000_000n;
-
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-function ceilPrice(tokens: number, microUsdPerMillionTokens: number): number {
-  const numerator =
-    BigInt(tokens) * BigInt(microUsdPerMillionTokens);
-  const value =
-    numerator === 0n
-      ? 0n
-      : (numerator + TOKENS_PER_RATE_UNIT - 1n) /
-        TOKENS_PER_RATE_UNIT;
-
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error("Synthetic demo charge exceeds the safe integer range.");
-  }
-  return Number(value);
+function digest(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function requireNonNegativeInteger(value: number, label: string): void {
@@ -59,11 +61,7 @@ function requireNonNegativeInteger(value: number, label: string): void {
   }
 }
 
-function createSyntheticReceipt(
-  runId: string,
-  requestNumber: number,
-  usage: UsageSeed
-): SyntheticCostReceipt {
+function toSyntheticProviderUsage(usage: UsageSeed): ProviderUsage {
   requireNonNegativeInteger(
     usage.uncachedInputTokens,
     "uncachedInputTokens"
@@ -71,18 +69,27 @@ function createSyntheticReceipt(
   requireNonNegativeInteger(usage.cachedInputTokens, "cachedInputTokens");
   requireNonNegativeInteger(usage.outputTokens, "outputTokens");
 
-  const uncachedInputMicroUsd = ceilPrice(
-    usage.uncachedInputTokens,
-    DEMO_RATE_CARD.uncachedInputMicroUsdPerMillionTokens
+  return {
+    inputTokens:
+      usage.uncachedInputTokens + usage.cachedInputTokens,
+    cachedInputTokens: usage.cachedInputTokens,
+    outputTokens: usage.outputTokens,
+    usageSource: "provider"
+  };
+}
+
+function createSyntheticReceipt(
+  runId: string,
+  requestNumber: number,
+  usage: UsageSeed
+): SyntheticCostReceipt {
+  const priced = calculateUsageCost(
+    GPT_5_4_MINI_STANDARD_RATE_CARD,
+    toSyntheticProviderUsage(usage)
   );
-  const cachedInputMicroUsd = ceilPrice(
-    usage.cachedInputTokens,
-    DEMO_RATE_CARD.cachedInputMicroUsdPerMillionTokens
-  );
-  const outputMicroUsd = ceilPrice(
-    usage.outputTokens,
-    DEMO_RATE_CARD.outputMicroUsdPerMillionTokens
-  );
+  const charge = (kind: "uncached_input" | "cached_input" | "output") =>
+    priced.charges.find((candidate) => candidate.kind === kind)?.microUsd ??
+    0;
 
   return {
     id: `${runId}:receipt:${String(requestNumber).padStart(2, "0")}`,
@@ -92,19 +99,31 @@ function createSyntheticReceipt(
     rounding: "CEIL_EACH_AGGREGATE_CHARGE",
     usage: { ...usage },
     charges: {
-      uncachedInputMicroUsd,
-      cachedInputMicroUsd,
-      outputMicroUsd
+      uncachedInputMicroUsd: charge("uncached_input"),
+      cachedInputMicroUsd: charge("cached_input"),
+      outputMicroUsd: charge("output")
     },
-    totalMicroUsd:
-      uncachedInputMicroUsd + cachedInputMicroUsd + outputMicroUsd,
+    totalMicroUsd: priced.totalMicroUsd,
     disclosure: "Synthetic demo calculation; not measured API usage."
   };
 }
 
+function protectedFinalReserve(snapshot: LedgerSnapshot): number {
+  const stillAvailable =
+    !snapshot.closed &&
+    snapshot.pendingFinalValidationRequestId === null &&
+    snapshot.activeReservation?.phase !== "final" &&
+    snapshot.responsesStarted < snapshot.policy.maxResponses;
+
+  return stillAvailable
+    ? snapshot.policy.finalAnswerReserveMicroUsd
+    : 0;
+}
+
 function createMetrics(
   scenario: DemoScenario,
-  seed: EventSeed["metrics"]
+  seed: EventSeed["metrics"],
+  snapshot: LedgerSnapshot
 ): EventMetricsSnapshot {
   const numericEntries = Object.entries(seed) as Array<
     [keyof typeof seed, number]
@@ -113,10 +132,11 @@ function createMetrics(
     requireNonNegativeInteger(value, String(key));
   }
 
+  const finalReserveMicroUsd = protectedFinalReserve(snapshot);
   const committed =
-    seed.settledMicroUsd +
-    seed.reservedMicroUsd +
-    seed.finalReserveMicroUsd;
+    snapshot.settledMicroUsd +
+    snapshot.outstandingReservedMicroUsd +
+    finalReserveMicroUsd;
   const remainingMicroUsd =
     scenario.taskPolicy.applicationCeilingMicroUsd - committed;
   if (remainingMicroUsd < 0) {
@@ -126,9 +146,9 @@ function createMetrics(
   }
 
   return {
-    settledMicroUsd: seed.settledMicroUsd,
-    reservedMicroUsd: seed.reservedMicroUsd,
-    finalReserveMicroUsd: seed.finalReserveMicroUsd,
+    settledMicroUsd: snapshot.settledMicroUsd,
+    reservedMicroUsd: snapshot.outstandingReservedMicroUsd,
+    finalReserveMicroUsd,
     remainingMicroUsd,
     inputTokens:
       seed.uncachedInputTokens + seed.cachedInputTokens,
@@ -144,16 +164,93 @@ interface BuiltEvents {
   readonly receipts: readonly SyntheticCostReceipt[];
 }
 
+const CORE_RISK_DRIVER_LABELS: Record<RiskDriverCode, string> = {
+  NO_STATIC_COMPLETION_PATH: "No static completion path",
+  FINAL_RESERVE_PRESSURE: "Final reserve pressure",
+  BUDGET_UTILIZATION: "Budget utilization",
+  CONTEXT_GROWTH: "Context growth",
+  EQUIVALENT_RETRIES: "Equivalent retry limit",
+  FAILED_TOOL_CALLS: "Repeated tool failures",
+  NO_RESPONSES_REMAINING: "No responses remaining"
+};
+
+function createLedger(scenario: DemoScenario): ReservationLedger {
+  if (
+    GPT_5_4_MINI_STANDARD_RATE_CARD.version !==
+    DEMO_RATE_CARD_VERSION
+  ) {
+    throw new Error("The demo and governor core rate cards do not match.");
+  }
+
+  const taskPolicy = scenario.taskPolicy;
+  return new ReservationLedger(
+    createGovernorPolicy({
+      applicationCeilingMicroUsd:
+        taskPolicy.applicationCeilingMicroUsd,
+      finalAnswerReserveMicroUsd:
+        taskPolicy.protectedFinalReserveMicroUsd,
+      finalAnswerInputTokenLimit:
+        taskPolicy.finalAnswerInputTokenLimit,
+      minimumFinalOutputTokens:
+        taskPolicy.minimumFinalOutputTokens,
+      maxResponses: taskPolicy.maxResponses,
+      maxEquivalentRetries: taskPolicy.maxEquivalentRetries,
+      rateCardVersion: taskPolicy.rateCardVersion
+    }),
+    GPT_5_4_MINI_STANDARD_RATE_CARD
+  );
+}
+
+function coreRiskDrivers(
+  assessment: RiskAssessment
+): readonly ObservedRiskDriver[] {
+  return assessment.drivers.map((driver) => ({
+    id: `governor-core-${driver.code.toLowerCase().replaceAll("_", "-")}`,
+    direction: "INCREASES_RISK" as const,
+    label: CORE_RISK_DRIVER_LABELS[driver.code],
+    evidence: driver.evidence
+  }));
+}
+
+function createEventRisk(
+  seed: EventSeed,
+  assessment: RiskAssessment
+): RunEvent["risk"] {
+  const narrativeDrivers = clone(seed.risk.observedDrivers);
+  const observedIds = new Set(
+    narrativeDrivers.map((driver) => driver.id)
+  );
+  const derivedDrivers = coreRiskDrivers(assessment).filter(
+    (driver) => !observedIds.has(driver.id)
+  );
+
+  return {
+    ...clone(seed.risk),
+    band: assessment.band,
+    engine: "GOVERNOR_CORE",
+    observedDrivers: [...narrativeDrivers, ...derivedDrivers]
+  };
+}
+
 function buildEvents(
   runId: string,
   scenario: DemoScenario,
   blueprint: RunBlueprint
 ): BuiltEvents {
+  const ledger = createLedger(scenario);
+  const retryTracker = new RetryFingerprintTracker(
+    scenario.taskPolicy.maxEquivalentRetries
+  );
+  const pricingIdentity = ledger.getPricingIdentity();
+  let requestNumber = 0;
   let receiptNumber = 0;
   let settledFromReceipts = 0;
   let uncachedInputTokens = 0;
   let cachedInputTokens = 0;
   let outputTokens = 0;
+  let failedToolCalls = 0;
+  let equivalentRetryCount = 0;
+  let activeRequestId: string | null = null;
   let previousOffset = -1;
   const receipts: SyntheticCostReceipt[] = [];
 
@@ -167,10 +264,67 @@ function buildEvents(
 
     const sequence = index + 1;
     const eventId = `${runId}:event:${String(sequence).padStart(2, "0")}`;
-    const metrics = createMetrics(scenario, seed.metrics);
     let syntheticReceipt: SyntheticCostReceipt | undefined;
+    let requestAdmission: DemoRequestAdmission | undefined;
 
-    if (seed.receiptUsage) {
+    if (seed.type === "REQUEST_ADMITTED") {
+      if (!seed.request) {
+        throw new Error(
+          `Demo fixture ${scenario.id} is missing request admission data at event ${sequence}.`
+        );
+      }
+      requestNumber += 1;
+      const requestId = `${runId}:request:${String(requestNumber).padStart(
+        2,
+        "0"
+      )}`;
+      const admission = ledger.reserve({
+        requestId,
+        exactInputTokens: seed.request.exactInputTokens,
+        requestedMaxOutputTokens:
+          seed.request.requestedMaxOutputTokens,
+        minimumUsefulOutputTokens:
+          seed.request.minimumUsefulOutputTokens,
+        phase: seed.request.phase,
+        binding: {
+          contextSha256: digest(`${requestId}:synthetic-context`),
+          model: pricingIdentity.model,
+          serviceTier: pricingIdentity.requestServiceTier,
+          processingRegion: pricingIdentity.processingRegion
+        }
+      });
+      if (!admission.admitted) {
+        throw new Error(
+          `Demo fixture ${scenario.id} was denied by the governor core at event ${sequence}: ${admission.reason}.`
+        );
+      }
+      ledger.dispatch(requestId, {
+        requestSha256: digest(`${requestId}:synthetic-request`)
+      });
+      activeRequestId = requestId;
+      requestAdmission = {
+        requestId,
+        phase: seed.request.phase,
+        exactInputTokens: seed.request.exactInputTokens,
+        requestedMaxOutputTokens:
+          seed.request.requestedMaxOutputTokens,
+        minimumUsefulOutputTokens:
+          seed.request.minimumUsefulOutputTokens,
+        admittedMaxOutputTokens:
+          admission.reservation.maxOutputTokens
+      };
+    } else if (seed.request) {
+      throw new Error(
+        `Demo fixture ${scenario.id} attached admission data to ${seed.type}.`
+      );
+    }
+
+    if (seed.type === "RESPONSE_SETTLED") {
+      if (!seed.receiptUsage || activeRequestId === null) {
+        throw new Error(
+          `Demo fixture ${scenario.id} cannot settle event ${sequence} without an active request and synthetic usage.`
+        );
+      }
       receiptNumber += 1;
       syntheticReceipt = createSyntheticReceipt(
         runId,
@@ -179,11 +333,87 @@ function buildEvents(
       );
       receipts.push(syntheticReceipt);
       settledFromReceipts += syntheticReceipt.totalMicroUsd;
+      const settlement = ledger.settle(
+        activeRequestId,
+        toSyntheticProviderUsage(seed.receiptUsage),
+        {
+          id: `${runId}:synthetic-response:${String(
+            receiptNumber
+          ).padStart(2, "0")}`,
+          model: pricingIdentity.model,
+          serviceTier: pricingIdentity.requestServiceTier,
+          status: "completed"
+        }
+      );
+      if (settlement.settledMicroUsd !== syntheticReceipt.totalMicroUsd) {
+        throw new Error(
+          `Demo fixture ${scenario.id} diverged from governor settlement at event ${sequence}.`
+        );
+      }
+      activeRequestId = null;
       uncachedInputTokens +=
         syntheticReceipt.usage.uncachedInputTokens;
       cachedInputTokens += syntheticReceipt.usage.cachedInputTokens;
       outputTokens += syntheticReceipt.usage.outputTokens;
+    } else if (seed.receiptUsage) {
+      throw new Error(
+        `Demo fixture ${scenario.id} attached usage to ${seed.type}.`
+      );
     }
+
+    if (seed.retryAttempt) {
+      const retryObservation = retryTracker.observe(seed.retryAttempt);
+      equivalentRetryCount =
+        retryObservation.equivalentRetryCount;
+      if (
+        seed.type === "RETRY_REJECTED" &&
+        retryObservation.retryAllowed
+      ) {
+        throw new Error(
+          `Demo fixture ${scenario.id} rejected a retry before the core limit was reached.`
+        );
+      }
+      if (
+        seed.type !== "RETRY_REJECTED" &&
+        !retryObservation.retryAllowed
+      ) {
+        throw new Error(
+          `Demo fixture ${scenario.id} admitted retry work after the core limit was reached.`
+        );
+      }
+    }
+    if (seed.failedToolCall) {
+      failedToolCalls += 1;
+    }
+
+    if (seed.type === "QUALITY_EVALUATED") {
+      const pendingFinalRequestId =
+        ledger.getSnapshot().pendingFinalValidationRequestId;
+      if (pendingFinalRequestId !== null) {
+        ledger.finalizeFinalResponse(
+          pendingFinalRequestId,
+          blueprint.quality.gate === "PASSED"
+        );
+      } else if (blueprint.status === "COMPLETED") {
+        throw new Error(
+          `Demo fixture ${scenario.id} completed without final-response validation.`
+        );
+      }
+    }
+    if (seed.type === "RUN_STOPPED") {
+      ledger.closeStoppedJob();
+    }
+
+    const snapshot = ledger.getSnapshot();
+    if (
+      seed.type === "RUN_COMPLETED" &&
+      (!snapshot.closed || snapshot.completionAccepted !== true)
+    ) {
+      throw new Error(
+        `Demo fixture ${scenario.id} reached completion before the governor ledger closed.`
+      );
+    }
+    const metrics = createMetrics(scenario, seed.metrics, snapshot);
 
     if (
       metrics.settledMicroUsd !== settledFromReceipts ||
@@ -196,7 +426,15 @@ function buildEvents(
       );
     }
 
-    return {
+    const assessment = assessLedgerRisk(snapshot, {
+      minimumCompletionCostMicroUsd:
+        seed.minimumCompletionCostMicroUsd ?? 0,
+      baselineContextTokens: scenario.initialContextTokens,
+      currentContextTokens: metrics.contextTokens,
+      equivalentRetryCount,
+      failedToolCalls
+    });
+    const event: RunEvent = {
       id: eventId,
       sequence,
       offsetMs: seed.offsetMs,
@@ -204,7 +442,8 @@ function buildEvents(
       title: seed.title,
       detail: seed.detail,
       metrics,
-      risk: clone(seed.risk),
+      risk: createEventRisk(seed, assessment),
+      ...(requestAdmission ? { requestAdmission } : {}),
       ...(seed.action
         ? {
             action: {
@@ -215,6 +454,10 @@ function buildEvents(
         : {}),
       ...(syntheticReceipt ? { syntheticReceipt } : {})
     };
+    if (seed.type === "RETRY_REJECTED") {
+      equivalentRetryCount = 0;
+    }
+    return event;
   });
 
   const terminalEvent = events.at(-1);
@@ -225,16 +468,37 @@ function buildEvents(
       `Demo fixture ${scenario.id} does not end in ${expectedTerminalType}.`
     );
   }
+  const finalSnapshot = ledger.getSnapshot();
+  if (
+    !finalSnapshot.closed ||
+    finalSnapshot.completionAccepted !==
+      (blueprint.status === "COMPLETED")
+  ) {
+    throw new Error(
+      `Demo fixture ${scenario.id} did not reach its expected governor terminal state.`
+    );
+  }
 
   return { events, receipts };
 }
 
 function finalSettledMicroUsd(blueprint: RunBlueprint): number {
-  const finalEvent = blueprint.events.at(-1);
-  if (!finalEvent) {
+  if (blueprint.events.length === 0) {
     throw new Error("Demo run blueprints must contain at least one event.");
   }
-  return finalEvent.metrics.settledMicroUsd;
+  const total = blueprint.events.reduce(
+    (settledMicroUsd, event) =>
+      settledMicroUsd +
+      (event.receiptUsage
+        ? calculateUsageCost(
+            GPT_5_4_MINI_STANDARD_RATE_CARD,
+            toSyntheticProviderUsage(event.receiptUsage)
+          ).totalMicroUsd
+        : 0),
+    0
+  );
+  requireNonNegativeInteger(total, "Demo settled cost");
+  return total;
 }
 
 function appliedInterventionKinds(

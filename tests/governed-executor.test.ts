@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ReservationLedger,
   createGovernorPolicy,
@@ -9,6 +9,7 @@ import type {
   ResponseContext,
   TerminalResponse
 } from "../server/openai/index.js";
+import { OpenAiApiError } from "../server/openai/index.js";
 import {
   executeGovernedResponse,
   type ResponsesProvider
@@ -214,6 +215,60 @@ describe("executeGovernedResponse", () => {
     expect(result.snapshot.activeReservation).toBeNull();
   });
 
+  it("rejects previous_response_id before provider preflight", async () => {
+    const fake = providerFor();
+
+    const result = await executeGovernedResponse({
+      ledger: createLedger(),
+      provider: fake.provider,
+      requestId: "stateful-context",
+      context: {
+        ...context,
+        previous_response_id: "resp_previous"
+      },
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    });
+
+    expect(result.status).toBe("preflight_failed");
+    expect(fake.counts).toEqual({ preflight: 0, create: 0 });
+    expect(result.snapshot.activeReservation).toBeNull();
+  });
+
+  it("releases a reservation when dispatch preparation fails", async () => {
+    const ledger = createLedger();
+    const dispatch = vi
+      .spyOn(ledger, "dispatch")
+      .mockImplementation(() => {
+        throw new Error("dispatch binding failed");
+      });
+    const fake = providerFor();
+
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: fake.provider,
+      requestId: "dispatch-failure",
+      context,
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    });
+
+    expect(result.status).toBe("preflight_failed");
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(fake.counts).toEqual({ preflight: 1, create: 0 });
+    expect(ledger.getReservation("dispatch-failure")).toMatchObject({
+      status: "released",
+      terminalReason: "released_before_dispatch"
+    });
+    expect(result.snapshot).toMatchObject({
+      activeReservation: null,
+      outstandingReservedMicroUsd: 0,
+      responsesStarted: 0
+    });
+  });
+
   it("retains the full reservation after a dispatched transport failure", async () => {
     const ledger = createLedger();
     const fake = providerFor(async () => {
@@ -237,6 +292,85 @@ describe("executeGovernedResponse", () => {
         status: "ambiguous",
         ambiguity: { reason: "transport_error" }
       });
+      expect(result.snapshot.outstandingReservedMicroUsd).toBe(
+        result.reservation.reservedMicroUsd
+      );
+    }
+  });
+
+  it("releases the reservation after a definitive provider rejection", async () => {
+    const ledger = createLedger();
+    const fake = providerFor(async () => {
+      throw new OpenAiApiError("request rejected", {
+        status: 429,
+        requestId: "req_429",
+        ambiguous: false
+      });
+    });
+
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: fake.provider,
+      requestId: "rejected-429",
+      context,
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    });
+
+    expect(result.status).toBe("provider_rejected");
+    if (result.status === "provider_rejected") {
+      expect(result.providerError).toEqual({
+        httpStatus: 429,
+        requestId: "req_429",
+        ambiguous: false
+      });
+      expect(result.reservation).toMatchObject({
+        status: "released",
+        terminalReason: "provider_rejected",
+        providerRejection: {
+          httpStatus: 429,
+          requestId: "req_429"
+        }
+      });
+    }
+    expect(result.snapshot).toMatchObject({
+      settledMicroUsd: 0,
+      outstandingReservedMicroUsd: 0,
+      activeReservation: null,
+      responsesStarted: 1
+    });
+  });
+
+  it("retains the reservation after an ambiguous provider failure", async () => {
+    const ledger = createLedger();
+    const fake = providerFor(async () => {
+      throw new OpenAiApiError("outcome unknown", {
+        status: 500,
+        requestId: "req_500",
+        ambiguous: true
+      });
+    });
+
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: fake.provider,
+      requestId: "ambiguous-500",
+      context,
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    });
+
+    expect(result.status).toBe("unresolved");
+    if (result.status === "unresolved") {
+      expect(result.reason).toBe("transport_error");
+      expect(result.providerError).toEqual({
+        httpStatus: 500,
+        requestId: "req_500",
+        ambiguous: true
+      });
+      expect(result.reservation.status).toBe("ambiguous");
       expect(result.snapshot.outstandingReservedMicroUsd).toBe(
         result.reservation.reservedMicroUsd
       );
@@ -302,6 +436,45 @@ describe("executeGovernedResponse", () => {
       });
       expect(result.snapshot.settledMicroUsd).toBe(0);
     }
+  });
+
+  it("rejects relationally invalid usage before ledger settlement", async () => {
+    const ledger = createLedger();
+    const settle = vi.spyOn(ledger, "settle");
+    const fake = providerFor(async () =>
+      terminalResponse({
+        usage: {
+          inputTokens: 10,
+          cachedInputTokens: 8,
+          cacheWriteInputTokens: 3,
+          outputTokens: 5,
+          reasoningOutputTokens: 2,
+          totalTokens: 15
+        }
+      })
+    );
+
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: fake.provider,
+      requestId: "invalid-provider-usage",
+      context,
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    });
+
+    expect(result.status).toBe("unresolved");
+    if (result.status === "unresolved") {
+      expect(result.reason).toBe("provider_protocol_error");
+      expect(result.reservation).toMatchObject({
+        status: "ambiguous",
+        ambiguity: { reason: "provider_protocol_error" }
+      });
+      expect(result.reservation.ambiguity?.observedUsage).toBeUndefined();
+    }
+    expect(settle).not.toHaveBeenCalled();
+    expect(result.snapshot.settledMicroUsd).toBe(0);
   });
 
   it("requires application validation after a final response settles", async () => {
@@ -424,6 +597,43 @@ describe("executeGovernedResponse", () => {
     });
     expect(createdRequest?.input).toEqual(countedContext?.input);
     expect(Object.isFrozen(countedContext?.input)).toBe(true);
+  });
+
+  it("preserves an own __proto__ property in canonical request data", async () => {
+    const hostileInput = JSON.parse(
+      '{"__proto__":{"polluted":true},"safe":"value"}'
+    ) as Record<string, unknown>;
+    let countedInput: unknown;
+    let createdInput: unknown;
+    const provider: ResponsesProvider = {
+      async countInput(receivedContext) {
+        countedInput = receivedContext.input;
+        return 10;
+      },
+      async createResponse(request) {
+        createdInput = request.input;
+        return terminalResponse();
+      }
+    };
+
+    const result = await executeGovernedResponse({
+      ledger: createLedger(),
+      provider,
+      requestId: "own-proto-key",
+      context: { ...context, input: hostileInput },
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    });
+
+    expect(result.status).toBe("settled");
+    expect(Object.getPrototypeOf(countedInput)).toBeNull();
+    expect(Object.hasOwn(countedInput as object, "__proto__")).toBe(true);
+    expect((countedInput as Record<string, unknown>).__proto__).toEqual({
+      polluted: true
+    });
+    expect(createdInput).toBe(countedInput);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   it("rejects unpriced request options before preflight", async () => {

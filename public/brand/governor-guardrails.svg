@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>Governor Guardrails logo concept</title>
+  <path
+    d="M21 11H13V53H21M43 11H51V53H43"
+    stroke="#14231F"
+    stroke-width="6"
+    stroke-linecap="square"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M24 32H41"
+    stroke="#14231F"
+    stroke-width="6"
+    stroke-linecap="round"
+  />
+  <path
+    d="M35 25L42 32L35 39"
+    stroke="#18A875"
+    stroke-width="4"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

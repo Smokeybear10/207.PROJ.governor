@@ -256,6 +256,29 @@ describe("versioned rate cards and fixed-point cost math", () => {
 });
 
 describe("reservation ledger", () => {
+  it("seals an inactive stopped job against later admission", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+
+    expect(ledger.closeStoppedJob()).toMatchObject({
+      closed: true,
+      completionAccepted: false,
+      activeReservation: null
+    });
+    expect(
+      ledger.reserve({
+        requestId: "after-stop",
+        exactInputTokens: 10,
+        requestedMaxOutputTokens: 10,
+        minimumUsefulOutputTokens: 1,
+        phase: "work",
+        binding: requestBinding
+      })
+    ).toMatchObject({
+      admitted: false,
+      reason: "JOB_CLOSED"
+    });
+  });
+
   it("protects final reserve and caps work at the exact budget boundary", () => {
     const ledger = new ReservationLedger(policy, rateCard);
     const result = reserve(ledger, {
@@ -403,6 +426,50 @@ describe("reservation ledger", () => {
     });
     expect(reconciled.status).toBe("settled");
     expect(ledger.getSnapshot().outstandingReservedMicroUsd).toBe(0);
+  });
+
+  it("releases a definitively rejected provider request with evidence", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    reserve(ledger, {
+      requestId: "provider-rejected",
+      exactInputTokens: 10,
+      requestedMaxOutputTokens: 5,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    });
+    dispatch(ledger, "provider-rejected");
+
+    const released = ledger.releaseProviderRejection(
+      "provider-rejected",
+      {
+        httpStatus: 429,
+        requestId: "req_rate_limited"
+      }
+    );
+
+    expect(released).toMatchObject({
+      status: "released",
+      terminalReason: "provider_rejected",
+      providerRejection: {
+        httpStatus: 429,
+        requestId: "req_rate_limited"
+      }
+    });
+    expect(ledger.getSnapshot()).toMatchObject({
+      settledMicroUsd: 0,
+      outstandingReservedMicroUsd: 0,
+      activeReservation: null,
+      responsesStarted: 1
+    });
+    expect(() =>
+      ledger.releaseProviderRejection("provider-rejected", {
+        httpStatus: 408
+      })
+    ).toThrowError(
+      expect.objectContaining<Partial<GovernorError>>({
+        code: "INVALID_TRANSITION"
+      })
+    );
   });
 
   it("only releases before dispatch and retains unsupported cancellation", () => {

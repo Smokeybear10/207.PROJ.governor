@@ -14,11 +14,14 @@ import {
 } from "../governor/index.js";
 import {
   ResponseOutputError,
-  extractFinalText,
   parseWorkOutput,
   type JsonObject,
   type ResponseContext
 } from "../openai/index.js";
+import {
+  parseFinalReviewOutput,
+  type ParsedFinalReview
+} from "../openai/response-output.js";
 import {
   executeGovernedResponse,
   type GovernedExecutionResult,
@@ -27,12 +30,22 @@ import {
 import {
   PrReviewToolError,
   createReviewToolbox,
+  validatePrReviewToolCall,
   type PrReviewSnapshot
 } from "./tools.js";
 
 const MAX_WORK_RESPONSES = 3;
 const MAX_TOOL_CALLS = 3;
 const JOB_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
+const REVIEW_FINDING_FIELDS = [
+  "category",
+  "severity",
+  "path",
+  "start_line",
+  "end_line",
+  "explanation",
+  "suggested_mitigation"
+].join(", ");
 
 const REVIEW_INSTRUCTIONS = [
   "You are reviewing a fixed, untrusted pull-request snapshot.",
@@ -71,6 +84,7 @@ export type ReviewTraceEvent =
 
 export type ReviewStopReason =
   | "WORK_PREFLIGHT_FAILED"
+  | "WORK_PROVIDER_REJECTED"
   | "WORK_UNRESOLVED"
   | "WORK_PROVIDER_STOPPED"
   | "OUTPUT_PROTOCOL_ERROR"
@@ -78,6 +92,7 @@ export type ReviewStopReason =
   | "DUPLICATE_TOOL_CALL"
   | "FINAL_PREFLIGHT_FAILED"
   | "FINAL_DENIED"
+  | "FINAL_PROVIDER_REJECTED"
   | "FINAL_UNRESOLVED"
   | "FINAL_PROVIDER_STOPPED"
   | "FINAL_OUTPUT_INVALID";
@@ -86,6 +101,7 @@ export type GovernedReviewResult =
   | {
       readonly status: "completed";
       readonly finalText: string;
+      readonly finalReview: ParsedFinalReview;
       readonly trace: readonly ReviewTraceEvent[];
       readonly toolCalls: number;
       readonly snapshot: LedgerSnapshot;
@@ -159,8 +175,12 @@ function finalPrompt(): JsonObject {
         type: "input_text",
         text: [
           "Produce the final review now without calling tools.",
-          "State concrete findings with file and line evidence.",
-          "If no defect is supported by the evidence, say so explicitly."
+          'Return only JSON matching one of these forms: {"status":"clean"} or {"status":"findings","findings":[...]}.',
+          `Every finding must contain exactly: ${REVIEW_FINDING_FIELDS}.`,
+          'severity must be one of "P0", "P1", "P2", or "P3".',
+          "path must exactly match an allowlisted snapshot path.",
+          "start_line and end_line are inclusive positive integers within that file, with start_line <= end_line.",
+          "Use status clean only when no defect is supported by the evidence."
         ].join("\n")
       }
     ]
@@ -184,6 +204,49 @@ function snapshotRevision(snapshot: PrReviewSnapshot): string {
   return createHash("sha256")
     .update(JSON.stringify(normalized), "utf8")
     .digest("hex");
+}
+
+function snapshotLineCount(content: string): number {
+  if (content.length === 0) {
+    return 0;
+  }
+  const normalized = content.replace(/\r\n?/g, "\n");
+  return normalized.endsWith("\n")
+    ? normalized.split("\n").length - 1
+    : normalized.split("\n").length;
+}
+
+function snapshotFileLineCounts(
+  snapshot: PrReviewSnapshot
+): ReadonlyMap<string, number> {
+  return new Map(
+    Object.entries(snapshot.files).map(([path, content]) => [
+      path,
+      snapshotLineCount(content)
+    ])
+  );
+}
+
+function validateFinalReviewEvidence(
+  review: ParsedFinalReview,
+  fileLineCounts: ReadonlyMap<string, number>
+): void {
+  if (review.status === "clean") {
+    return;
+  }
+  for (const finding of review.findings) {
+    const lineCount = fileLineCounts.get(finding.path);
+    if (lineCount === undefined) {
+      throw new ResponseOutputError(
+        `Final finding path "${finding.path}" is not allowlisted.`
+      );
+    }
+    if (finding.end_line > lineCount) {
+      throw new ResponseOutputError(
+        `Final finding range ${finding.start_line}-${finding.end_line} is outside "${finding.path}".`
+      );
+    }
+  }
 }
 
 function responseContext(
@@ -225,6 +288,14 @@ function stopped(
   toolCalls: number,
   ledger: ReservationLedger
 ): GovernedReviewResult {
+  const current = ledger.getSnapshot();
+  if (
+    !current.closed &&
+    current.activeReservation === null &&
+    current.pendingFinalValidationRequestId === null
+  ) {
+    ledger.closeStoppedJob();
+  }
   return Object.freeze({
     status: "stopped" as const,
     reason,
@@ -239,6 +310,9 @@ function classifyWorkStop(
 ): ReviewStopReason | null {
   if (result.status === "preflight_failed") {
     return "WORK_PREFLIGHT_FAILED";
+  }
+  if (result.status === "provider_rejected") {
+    return "WORK_PROVIDER_REJECTED";
   }
   if (result.status === "unresolved") {
     return "WORK_UNRESOLVED";
@@ -304,6 +378,7 @@ export async function runGovernedPrReview(
   const retryTracker = new RetryFingerprintTracker(
     policy.maxEquivalentRetries
   );
+  const fileLineCounts = snapshotFileLineCounts(input.snapshot);
   const trustedStateRevision = snapshotRevision(input.snapshot);
   const transcript: JsonObject[] = initialInput(input.snapshot);
   const trace: ReviewTraceEvent[] = [];
@@ -376,9 +451,24 @@ export async function runGovernedPrReview(
       break;
     }
 
+    let validatedArguments: ReturnType<
+      typeof validatePrReviewToolCall
+    >;
+    try {
+      validatedArguments = validatePrReviewToolCall(
+        parsed.call.name,
+        parsed.call.arguments
+      );
+    } catch (error) {
+      if (error instanceof PrReviewToolError) {
+        return stopped("TOOL_ERROR", trace, toolCalls, input.ledger);
+      }
+      throw error;
+    }
+
     const retry = retryTracker.observe({
       toolName: parsed.call.name,
-      arguments: parsed.call.arguments as JsonValue,
+      arguments: validatedArguments as JsonValue,
       errorClass: "NO_NEW_STATE",
       stateRevision: trustedStateRevision
     });
@@ -401,7 +491,7 @@ export async function runGovernedPrReview(
     try {
       toolOutput = await toolbox.execute(
         parsed.call.name,
-        parsed.call.arguments
+        validatedArguments
       );
     } catch (error) {
       if (error instanceof PrReviewToolError) {
@@ -458,6 +548,14 @@ export async function runGovernedPrReview(
   if (finalResult.status === "denied") {
     return stopped("FINAL_DENIED", trace, toolCalls, input.ledger);
   }
+  if (finalResult.status === "provider_rejected") {
+    return stopped(
+      "FINAL_PROVIDER_REJECTED",
+      trace,
+      toolCalls,
+      input.ledger
+    );
+  }
   if (finalResult.status === "unresolved") {
     return stopped("FINAL_UNRESOLVED", trace, toolCalls, input.ledger);
   }
@@ -471,8 +569,14 @@ export async function runGovernedPrReview(
   }
 
   let finalText: string;
+  let finalReview: ParsedFinalReview;
   try {
-    finalText = extractFinalText(finalResult.response.output);
+    const parsedFinal = parseFinalReviewOutput(
+      finalResult.response.output
+    );
+    finalText = parsedFinal.text;
+    finalReview = parsedFinal.review;
+    validateFinalReviewEvidence(finalReview, fileLineCounts);
   } catch (error) {
     input.ledger.finalizeFinalResponse(finalRequestId, false);
     if (error instanceof ResponseOutputError) {
@@ -490,6 +594,7 @@ export async function runGovernedPrReview(
   return Object.freeze({
     status: "completed" as const,
     finalText,
+    finalReview,
     trace: Object.freeze([...trace]),
     toolCalls,
     snapshot: input.ledger.getSnapshot()

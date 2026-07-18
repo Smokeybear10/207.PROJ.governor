@@ -70,6 +70,11 @@ export interface ProviderResponseEvidence {
   readonly status: ProviderTerminalStatus;
 }
 
+export interface ProviderRejectionEvidence {
+  readonly httpStatus: number;
+  readonly requestId?: string;
+}
+
 export type ReservationStatus =
   | "reserved"
   | "in_flight"
@@ -106,6 +111,7 @@ export type ReservationTerminalReason =
   | "provider_failed"
   | "provider_incomplete"
   | "provider_cancelled"
+  | "provider_rejected"
   | "cancelled_with_usage"
   | "cancelled_before_dispatch"
   | "released_before_dispatch";
@@ -125,6 +131,7 @@ export interface RequestReservation {
   readonly settledMicroUsd?: number;
   readonly usage?: NormalizedProviderUsage;
   readonly providerResponse?: ProviderResponseEvidence;
+  readonly providerRejection?: ProviderRejectionEvidence;
   readonly applicationAccepted?: boolean;
   readonly ambiguity?: AmbiguityRecord;
   readonly terminalReason?: ReservationTerminalReason;
@@ -193,6 +200,7 @@ interface MutableReservation {
   settledMicroUsd?: number;
   usage?: NormalizedProviderUsage;
   providerResponse?: ProviderResponseEvidence;
+  providerRejection?: ProviderRejectionEvidence;
   applicationAccepted?: boolean;
   ambiguity?: AmbiguityRecord;
   terminalReason?: ReservationTerminalReason;
@@ -308,6 +316,9 @@ function snapshotReservation(
     ...(reservation.providerResponse === undefined
       ? {}
       : { providerResponse: reservation.providerResponse }),
+    ...(reservation.providerRejection === undefined
+      ? {}
+      : { providerRejection: reservation.providerRejection }),
     ...(reservation.applicationAccepted === undefined
       ? {}
       : { applicationAccepted: reservation.applicationAccepted }),
@@ -534,6 +545,30 @@ export class ReservationLedger {
     return this.#settleReservation(reservation, usage, evidence);
   }
 
+  releaseProviderRejection(
+    requestId: string,
+    evidence: ProviderRejectionEvidence
+  ): RequestReservation {
+    const reservation = this.#requireActive(requestId, ["in_flight"]);
+    assertGovernor(
+      Number.isSafeInteger(evidence.httpStatus) &&
+        evidence.httpStatus >= 400 &&
+        evidence.httpStatus < 500 &&
+        evidence.httpStatus !== 408,
+      "INVALID_ARGUMENT",
+      "Provider rejection evidence must contain a definitive 4xx status."
+    );
+    if (evidence.requestId !== undefined) {
+      requireNonEmptyString(evidence.requestId, "provider request id");
+    }
+    reservation.status = "released";
+    reservation.providerRejection = Object.freeze({ ...evidence });
+    reservation.terminalReason = "provider_rejected";
+    reservation.ambiguity = undefined;
+    this.#activeRequestId = null;
+    return snapshotReservation(reservation);
+  }
+
   markTimedOut(
     requestId: string,
     observedUsage?: ProviderUsageObservation
@@ -695,6 +730,19 @@ export class ReservationLedger {
     this.#completionAccepted = applicationAccepted;
     this.#closed = true;
     return snapshotReservation(reservation);
+  }
+
+  closeStoppedJob(): LedgerSnapshot {
+    assertGovernor(
+      !this.#closed &&
+        this.#activeRequestId === null &&
+        this.#pendingFinalValidationRequestId === null,
+      "INVALID_TRANSITION",
+      "Only an inactive job without pending final validation can be stopped."
+    );
+    this.#closed = true;
+    this.#completionAccepted = false;
+    return this.getSnapshot();
   }
 
   getSnapshot(): LedgerSnapshot {

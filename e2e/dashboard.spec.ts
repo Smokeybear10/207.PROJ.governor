@@ -119,9 +119,12 @@ test("loads the default operation with explicit synthetic truth", async ({
   await mockDemoApi(page);
   await gotoDashboard(page);
 
-  await expect(page.getByText("TokenGovernor", { exact: true })).toBeVisible();
+  await expect(page.getByText("Governor", { exact: true })).toBeVisible();
   await expect(
-    page.getByText("SCRIPTED FIXTURE / 0 EXTERNAL CALLS", { exact: true })
+    page.getByText(
+      "GOVERNOR CORE / SCRIPTED INPUTS / 0 EXTERNAL CALLS",
+      { exact: true }
+    )
   ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Execution control" })).toBeVisible();
   await expect(page.getByLabel("Scenario")).toHaveValue(
@@ -136,6 +139,9 @@ test("loads the default operation with explicit synthetic truth", async ({
   ).toBeEnabled();
   await expect(
     page.getByText("SYNTHETIC_DETERMINISTIC_FIXTURE", { exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByText("GOVERNOR_CORE_ENFORCED", { exact: true })
   ).toBeVisible();
   await expect(
     page.getByText("SIMULATED_LIST_PRICE_MICRO_USD", { exact: true })
@@ -210,6 +216,9 @@ test("plays ordered events, completes, and replays without another POST", async 
   await expect(
     timeline.getByText("Review completed within policy")
   ).toBeVisible();
+  await expect(
+    timeline.getByText("3,384 / 5,000 tok", { exact: true })
+  ).toBeVisible();
 
   await expect(
     page.getByRole("heading", {
@@ -246,7 +255,10 @@ test("plays ordered events, completes, and replays without another POST", async 
     truthStrip.getByText("TRACE COMPLETE", { exact: true })
   ).toBeVisible();
   await expect(
-    page.getByText("SCRIPTED REPLAY / 0 EXTERNAL CALLS", { exact: true })
+    page.getByText(
+      "GOVERNOR CORE REPLAY / 0 EXTERNAL CALLS",
+      { exact: true }
+    )
   ).toBeVisible();
   expect(
     mock.requests,

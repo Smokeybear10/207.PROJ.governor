@@ -1,4 +1,4 @@
-# TokenGovernor POC Findings
+# Governor POC Findings
 
 ## Verdict
 

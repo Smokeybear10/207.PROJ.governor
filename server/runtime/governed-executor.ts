@@ -1,5 +1,6 @@
 import {
   GovernorError,
+  normalizeProviderUsage,
   type AdmissionResult,
   type LedgerSnapshot,
   type ProviderResponseEvidence,
@@ -52,6 +53,12 @@ export type GovernedExecutionResult =
       snapshot: LedgerSnapshot;
     }
   | {
+      status: "provider_rejected";
+      providerError: ProviderErrorEvidence;
+      reservation: RequestReservation;
+      snapshot: LedgerSnapshot;
+    }
+  | {
       status: "unresolved";
       reason:
         | "transport_error"
@@ -61,6 +68,7 @@ export type GovernedExecutionResult =
         | "usage_mismatch";
       reservation: RequestReservation;
       response?: TerminalResponse;
+      providerError?: ProviderErrorEvidence;
       snapshot: LedgerSnapshot;
     }
   | {
@@ -77,6 +85,12 @@ export type GovernedExecutionResult =
       snapshot: LedgerSnapshot;
     };
 
+export type ProviderErrorEvidence = {
+  readonly httpStatus: number;
+  readonly requestId?: string;
+  readonly ambiguous: boolean;
+};
+
 function safeErrorMessage(error: unknown): string {
   if (error instanceof GovernorError) {
     return error.code;
@@ -85,7 +99,7 @@ function safeErrorMessage(error: unknown): string {
 }
 
 function toGovernorUsage(usage: OpenAiProviderUsage) {
-  return {
+  const governorUsage = {
     inputTokens: usage.inputTokens,
     cachedInputTokens: usage.cachedInputTokens,
     cacheWriteTokens: usage.cacheWriteInputTokens,
@@ -94,6 +108,8 @@ function toGovernorUsage(usage: OpenAiProviderUsage) {
     totalTokens: usage.totalTokens,
     usageSource: "provider" as const
   };
+  normalizeProviderUsage(governorUsage);
+  return governorUsage;
 }
 
 function toProviderEvidence(
@@ -116,9 +132,34 @@ function toProviderEvidence(
 function ambiguityReasonForError(
   error: unknown
 ): "transport_error" | "provider_protocol_error" {
-  return error instanceof OpenAiApiError && !error.ambiguous
+  return error instanceof OpenAiApiError &&
+    (error.protocolError || !error.ambiguous)
     ? "provider_protocol_error"
     : "transport_error";
+}
+
+function providerErrorEvidence(
+  error: OpenAiApiError
+): ProviderErrorEvidence {
+  return Object.freeze({
+    httpStatus: error.status,
+    ...(error.requestId === undefined
+      ? {}
+      : { requestId: error.requestId }),
+    ambiguous: error.ambiguous
+  });
+}
+
+function isDefinitiveProviderRejection(
+  error: unknown
+): error is OpenAiApiError {
+  return (
+    error instanceof OpenAiApiError &&
+    !error.ambiguous &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408
+  );
 }
 
 function settlementAmbiguityReason(
@@ -198,14 +239,40 @@ export async function executeGovernedResponse(
     store: false,
     truncation: "disabled"
   };
-  input.ledger.dispatch(input.requestId, {
-    requestSha256: fingerprintGovernedRequest(request)
-  });
+  try {
+    const requestSha256 = fingerprintGovernedRequest(request);
+    input.ledger.dispatch(input.requestId, { requestSha256 });
+  } catch (error) {
+    input.ledger.release(input.requestId);
+    return {
+      status: "preflight_failed",
+      reason: safeErrorMessage(error),
+      snapshot: input.ledger.getSnapshot()
+    };
+  }
 
   let response: TerminalResponse;
   try {
     response = await input.provider.createResponse(request, input.signal);
   } catch (error) {
+    if (isDefinitiveProviderRejection(error)) {
+      const evidence = providerErrorEvidence(error);
+      const reservation = input.ledger.releaseProviderRejection(
+        input.requestId,
+        {
+          httpStatus: evidence.httpStatus,
+          ...(evidence.requestId === undefined
+            ? {}
+            : { requestId: evidence.requestId })
+        }
+      );
+      return {
+        status: "provider_rejected",
+        providerError: evidence,
+        reservation,
+        snapshot: input.ledger.getSnapshot()
+      };
+    }
     const reason = ambiguityReasonForError(error);
     const reservation = input.ledger.markAmbiguous(
       input.requestId,
@@ -215,8 +282,30 @@ export async function executeGovernedResponse(
       status: "unresolved",
       reason,
       reservation,
+      ...(error instanceof OpenAiApiError
+        ? { providerError: providerErrorEvidence(error) }
+        : {}),
       snapshot: input.ledger.getSnapshot()
     };
+  }
+
+  let providerUsage: ReturnType<typeof toGovernorUsage> | undefined;
+  if (response.usage !== null) {
+    try {
+      providerUsage = toGovernorUsage(response.usage);
+    } catch {
+      const reservation = input.ledger.markAmbiguous(
+        input.requestId,
+        "provider_protocol_error"
+      );
+      return {
+        status: "unresolved",
+        reason: "provider_protocol_error",
+        reservation,
+        response,
+        snapshot: input.ledger.getSnapshot()
+      };
+    }
   }
 
   if (
@@ -226,9 +315,7 @@ export async function executeGovernedResponse(
     const reservation = input.ledger.markAmbiguous(
       input.requestId,
       "nonterminal_response",
-      response.usage === null
-        ? undefined
-        : toGovernorUsage(response.usage)
+      providerUsage
     );
     return {
       status: "unresolved",
@@ -239,7 +326,7 @@ export async function executeGovernedResponse(
     };
   }
 
-  if (response.usage === null) {
+  if (providerUsage === undefined) {
     const reservation = input.ledger.markAmbiguous(
       input.requestId,
       "missing_usage"
@@ -256,7 +343,7 @@ export async function executeGovernedResponse(
   try {
     const reservation = input.ledger.settle(
       input.requestId,
-      toGovernorUsage(response.usage),
+      providerUsage,
       toProviderEvidence(response)
     );
     if (response.status !== "completed") {
@@ -279,7 +366,7 @@ export async function executeGovernedResponse(
     const reservation = input.ledger.markAmbiguous(
       input.requestId,
       reason,
-      toGovernorUsage(response.usage)
+      providerUsage
     );
     return {
       status: "unresolved",

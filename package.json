@@ -8,13 +8,16 @@
   },
   "scripts": {
     "dev": "concurrently --kill-others -n api,web -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
-    "dev:api": "tsx watch server/index.ts",
+    "dev:api": "tsx watch server/main.ts",
     "dev:web": "vite --host 127.0.0.1",
-    "start": "tsx server/index.ts",
+    "governor": "tsx cli/token-governor.ts",
+    "start": "tsx server/main.ts",
     "build": "tsc --noEmit && vite build",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:core": "vitest run tests/governor-core.test.ts tests/governor-cost-ledger.test.ts tests/governor-policy.test.ts tests/governor-log-reducer.test.ts",
+    "test:api": "vitest run tests/app.test.ts tests/server-startup.test.ts tests/openai-client.test.ts tests/governed-executor.test.ts tests/jobs-api.test.ts tests/cli.test.ts",
     "test:watch": "vitest",
     "test:e2e": "playwright test --pass-with-no-tests",
     "check": "npm run lint && npm test && npm run build"

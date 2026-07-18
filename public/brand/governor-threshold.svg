@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>Governor Threshold logo concept</title>
+  <path
+    d="M11 17H53"
+    stroke="#18A875"
+    stroke-width="5"
+    stroke-linecap="round"
+  />
+  <path
+    d="M16 48V37M27 48V30M38 48V24M49 48V17"
+    stroke="#14231F"
+    stroke-width="6"
+    stroke-linecap="square"
+  />
+  <path
+    d="M11 52H53"
+    stroke="#14231F"
+    stroke-width="4"
+    stroke-linecap="round"
+  />
+</svg>

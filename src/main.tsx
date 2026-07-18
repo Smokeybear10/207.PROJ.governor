@@ -6,7 +6,7 @@ import "./styles.css";
 const root = document.getElementById("root");
 
 if (!root) {
-  throw new Error("TokenGovernor could not find its root element.");
+  throw new Error("Governor could not find its root element.");
 }
 
 createRoot(root).render(

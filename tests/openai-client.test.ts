@@ -124,6 +124,10 @@ describe("OpenAiResponsesClient", () => {
 
     const result = await client.createResponse(governedRequest);
 
+    expect(result.model).toBe("gpt-5.4-mini");
+    expect(result.providerModel).toBe(
+      "gpt-5.4-mini-2026-04-01"
+    );
     expect(result.usage).toEqual({
       inputTokens: 1_000,
       cachedInputTokens: 400,
@@ -134,6 +138,73 @@ describe("OpenAiResponsesClient", () => {
     });
     expect(result.requestId).toBe("req_test");
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      name: "input partitions exceed input tokens",
+      usage: {
+        input_tokens: 10,
+        input_tokens_details: {
+          cached_tokens: 8,
+          cache_write_tokens: 3
+        },
+        output_tokens: 5,
+        output_tokens_details: { reasoning_tokens: 2 },
+        total_tokens: 15
+      }
+    },
+    {
+      name: "reasoning tokens exceed output tokens",
+      usage: {
+        input_tokens: 10,
+        input_tokens_details: {
+          cached_tokens: 0,
+          cache_write_tokens: 0
+        },
+        output_tokens: 5,
+        output_tokens_details: { reasoning_tokens: 6 },
+        total_tokens: 15
+      }
+    },
+    {
+      name: "total tokens do not equal input plus output",
+      usage: {
+        input_tokens: 10,
+        input_tokens_details: {
+          cached_tokens: 0,
+          cache_write_tokens: 0
+        },
+        output_tokens: 5,
+        output_tokens_details: { reasoning_tokens: 2 },
+        total_tokens: 16
+      }
+    }
+  ])("rejects usage when $name", async ({ usage }) => {
+    const client = new OpenAiResponsesClient({
+      apiKey: "test-key",
+      fetchImpl: async () =>
+        jsonResponse({
+          id: "resp_invalid_usage",
+          model: "gpt-5.4-mini",
+          service_tier: "default",
+          status: "completed",
+          output: [],
+          usage
+        })
+    });
+
+    const error = await client
+      .createResponse(governedRequest)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(OpenAiApiError);
+    expect(error).toMatchObject({
+      status: 200,
+      ambiguous: true,
+      protocolError: true,
+      requestId: "req_test"
+    });
   });
 
   it("marks model transport failures ambiguous and never retries", async () => {
@@ -152,6 +223,34 @@ describe("OpenAiResponsesClient", () => {
     expect(error).toBeInstanceOf(OpenAiApiError);
     expect((error as OpenAiApiError).ambiguous).toBe(true);
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("classifies definitive and ambiguous provider HTTP failures", async () => {
+    for (const [status, ambiguous] of [
+      [429, false],
+      [408, true],
+      [500, true]
+    ] as const) {
+      const client = new OpenAiResponsesClient({
+        apiKey: "test-key",
+        fetchImpl: async () =>
+          jsonResponse(
+            { error: { message: "provider failure" } },
+            { status }
+          )
+      });
+
+      const error = await client
+        .createResponse(governedRequest)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(OpenAiApiError);
+      expect(error).toMatchObject({
+        status,
+        requestId: "req_test",
+        ambiguous
+      });
+    }
   });
 
   it("cancels oversized streamed create-response bodies and keeps the outcome ambiguous", async () => {
@@ -276,6 +375,22 @@ describe("OpenAiResponsesClient", () => {
         tools: [{ type: "web_search" }]
       })
     ).rejects.toThrow("local function tools only");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects previous_response_id before dispatch", async () => {
+    const fetchImpl = vi.fn();
+    const client = new OpenAiResponsesClient({
+      apiKey: "test-key",
+      fetchImpl
+    });
+
+    await expect(
+      client.createResponse({
+        ...governedRequest,
+        previous_response_id: "resp_previous"
+      })
+    ).rejects.toThrow("must not use previous_response_id");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 

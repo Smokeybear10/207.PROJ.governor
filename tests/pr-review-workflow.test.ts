@@ -100,6 +100,39 @@ function message(id: string, text: string) {
   };
 }
 
+function finding(
+  overrides: Partial<{
+    category: string;
+    severity: "P0" | "P1" | "P2" | "P3";
+    path: string;
+    start_line: number;
+    end_line: number;
+    explanation: string;
+    suggested_mitigation: string;
+  }> = {}
+) {
+  return {
+    category: "correctness",
+    severity: "P1" as const,
+    path: "src/retry.ts",
+    start_line: 2,
+    end_line: 2,
+    explanation:
+      "The retry condition permits a third attempt after the expected boundary.",
+    suggested_mitigation:
+      "Change the boundary and retain a regression test for two retries.",
+    ...overrides
+  };
+}
+
+function findingsReview(...findings: ReturnType<typeof finding>[]) {
+  return JSON.stringify({ status: "findings", findings });
+}
+
+function cleanReview() {
+  return JSON.stringify({ status: "clean" });
+}
+
 function fullWorkflowScripts(): ScriptedResponse[] {
   return [
     {
@@ -137,7 +170,7 @@ function fullWorkflowScripts(): ScriptedResponse[] {
         reasoning("rs_4"),
         message(
           "msg_final",
-          "[P1] src/retry.ts:2 permits a third retry after the expected boundary."
+          findingsReview(finding())
         )
       ]
     }
@@ -163,8 +196,11 @@ describe("governed PR review workflow", () => {
     expect(result).toMatchObject({
       status: "completed",
       toolCalls: 3,
-      finalText:
-        "[P1] src/retry.ts:2 permits a third retry after the expected boundary.",
+      finalText: findingsReview(finding()),
+      finalReview: {
+        status: "findings",
+        findings: [finding()]
+      },
       snapshot: {
         closed: true,
         completionAccepted: true,
@@ -283,7 +319,7 @@ describe("governed PR review workflow", () => {
       {
         inputTokens: 120,
         outputTokens: 20,
-        output: [message("msg_final", "No supported finding.")]
+        output: [message("msg_final", cleanReview())]
       }
     ]);
 
@@ -299,7 +335,8 @@ describe("governed PR review workflow", () => {
 
     expect(result).toMatchObject({
       status: "completed",
-      finalText: "No supported finding.",
+      finalText: cleanReview(),
+      finalReview: { status: "clean" },
       toolCalls: 0,
       snapshot: { completionAccepted: true }
     });
@@ -307,7 +344,7 @@ describe("governed PR review workflow", () => {
     expect(provider.requests).toHaveLength(2);
   });
 
-  it("closes with a rejected completion when final output is invalid", async () => {
+  it("rejects malformed nonempty final output", async () => {
     const provider = new ScriptedResponsesProvider([
       {
         inputTokens: 100,
@@ -317,7 +354,7 @@ describe("governed PR review workflow", () => {
       {
         inputTokens: 120,
         outputTokens: 10,
-        output: [message("msg_final", "   ")]
+        output: [message("msg_final", "No supported finding.")]
       }
     ]);
     const ledger = createLedger();
@@ -344,6 +381,146 @@ describe("governed PR review workflow", () => {
     provider.assertComplete();
   });
 
+  it.each([
+    {
+      label: "fabricated path",
+      evidence: {
+        path: "src/fabricated.ts"
+      }
+    },
+    {
+      label: "fabricated line range",
+      evidence: {
+        start_line: 4,
+        end_line: 4
+      }
+    }
+  ])("rejects $label evidence", async ({ label, evidence }) => {
+    const provider = new ScriptedResponsesProvider([
+      {
+        inputTokens: 100,
+        outputTokens: 10,
+        output: [message("msg_work", "Evidence collection complete.")]
+      },
+      {
+        inputTokens: 120,
+        outputTokens: 30,
+        output: [
+          message(
+            `msg_final_${label.replaceAll(" ", "_")}`,
+            findingsReview(finding(evidence))
+          )
+        ]
+      }
+    ]);
+
+    const result = await runGovernedPrReview({
+      jobId: `review-${label.replaceAll(" ", "-")}`,
+      ledger: createLedger(),
+      provider,
+      snapshot: snapshot(),
+      workMaxOutputTokens: 256,
+      workMinimumOutputTokens: 16,
+      finalMaxOutputTokens: 600
+    });
+
+    expect(result).toMatchObject({
+      status: "stopped",
+      reason: "FINAL_OUTPUT_INVALID",
+      snapshot: {
+        closed: true,
+        completionAccepted: false
+      }
+    });
+    provider.assertComplete();
+  });
+
+  it("accepts the explicit clean result", async () => {
+    const provider = new ScriptedResponsesProvider([
+      {
+        inputTokens: 100,
+        outputTokens: 10,
+        output: [message("msg_work", "Evidence collection complete.")]
+      },
+      {
+        inputTokens: 120,
+        outputTokens: 10,
+        output: [message("msg_final", cleanReview())]
+      }
+    ]);
+
+    const result = await runGovernedPrReview({
+      jobId: "review-clean",
+      ledger: createLedger(),
+      provider,
+      snapshot: snapshot(),
+      workMaxOutputTokens: 256,
+      workMinimumOutputTokens: 16,
+      finalMaxOutputTokens: 600
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      finalReview: { status: "clean" },
+      snapshot: {
+        closed: true,
+        completionAccepted: true
+      }
+    });
+    provider.assertComplete();
+  });
+
+  it("validates a tool call before retry fingerprinting", async () => {
+    const provider = new ScriptedResponsesProvider([
+      {
+        inputTokens: 100,
+        outputTokens: 20,
+        output: [
+          toolCall("fc_1", "call_diff_1", "read_pr_diff", {})
+        ]
+      },
+      {
+        inputTokens: 150,
+        outputTokens: 20,
+        output: [
+          toolCall("fc_2", "call_diff_2", "read_pr_diff", {})
+        ]
+      },
+      {
+        inputTokens: 175,
+        outputTokens: 20,
+        output: [
+          toolCall("fc_3", "call_diff_3", "READ_PR_DIFF", {})
+        ]
+      }
+    ]);
+
+    const result = await runGovernedPrReview({
+      jobId: "review-tool-validation-order",
+      ledger: createLedger({ maxEquivalentRetries: 1 }),
+      provider,
+      snapshot: snapshot(),
+      workMaxOutputTokens: 256,
+      workMinimumOutputTokens: 16,
+      finalMaxOutputTokens: 600
+    });
+
+    expect(result).toMatchObject({
+      status: "stopped",
+      reason: "TOOL_ERROR",
+      toolCalls: 2
+    });
+    expect(result.trace).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "retry",
+          callId: "call_diff_3"
+        })
+      ])
+    );
+    provider.assertComplete();
+  });
+
   it("suppresses an equivalent read against the same trusted snapshot", async () => {
     const provider = new ScriptedResponsesProvider([
       {
@@ -363,7 +540,14 @@ describe("governed PR review workflow", () => {
       {
         inputTokens: 180,
         outputTokens: 20,
-        output: [message("msg_final", "No supported finding.")]
+        output: [
+          toolCall("fc_3", "call_diff_3", "read_pr_diff", {})
+        ]
+      },
+      {
+        inputTokens: 200,
+        outputTokens: 20,
+        output: [message("msg_final", cleanReview())]
       }
     ]);
 
@@ -379,16 +563,16 @@ describe("governed PR review workflow", () => {
 
     expect(result).toMatchObject({
       status: "completed",
-      toolCalls: 1,
+      toolCalls: 2,
       snapshot: { completionAccepted: true }
     });
     expect(result.trace).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: "retry",
-          callId: "call_diff_2",
+          callId: "call_diff_3",
           state: "LIMIT_REACHED",
-          equivalentRetryCount: 1,
+          equivalentRetryCount: 2,
           allowed: false
         })
       ])

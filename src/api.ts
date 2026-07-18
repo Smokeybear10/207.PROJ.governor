@@ -9,6 +9,7 @@ export const DEMO_TRUTH_LABEL =
 
 export type DemoProvenance = {
   origin: "SYNTHETIC_DETERMINISTIC_FIXTURE";
+  governorCore: "GOVERNOR_CORE_ENFORCED";
   externalApiCalls: 0;
   usageSource: "SIMULATED";
   costBasis: "SIMULATED_LIST_PRICE_MICRO_USD";
@@ -94,6 +95,14 @@ export type TraceAction = {
   source: "HARD_CAP" | "STATIC_GUARDRAIL" | "SHADOW_FORECAST";
 };
 
+export type RequestAdmission = {
+  phase: "work" | "final";
+  exactInputTokens: number;
+  requestedMaxOutputTokens: number;
+  minimumUsefulOutputTokens: number;
+  admittedMaxOutputTokens: number;
+};
+
 export type RunEvent = {
   id: string;
   offsetMs: number;
@@ -104,6 +113,7 @@ export type RunEvent = {
   risk: RiskBand;
   metrics: EventMetrics;
   drivers?: string[];
+  requestAdmission?: RequestAdmission;
   action?: TraceAction | string;
 };
 
@@ -187,10 +197,18 @@ type DetailedEvent = {
   };
   risk: {
     band: RiskBand;
+    engine: "GOVERNOR_CORE";
     observedDrivers?: Array<{
       label: string;
       evidence: string;
     }>;
+  };
+  requestAdmission?: {
+    phase: "work" | "final";
+    exactInputTokens: number;
+    requestedMaxOutputTokens: number;
+    minimumUsefulOutputTokens: number;
+    admittedMaxOutputTokens: number;
   };
   action?: {
     kind: string;
@@ -302,6 +320,7 @@ function validateTruth(value: Record<string, unknown>, label: string): DemoTruth
   const provenance = value.provenance;
   if (
     provenance.origin !== "SYNTHETIC_DETERMINISTIC_FIXTURE" ||
+    provenance.governorCore !== "GOVERNOR_CORE_ENFORCED" ||
     provenance.externalApiCalls !== 0 ||
     provenance.usageSource !== "SIMULATED" ||
     provenance.costBasis !== "SIMULATED_LIST_PRICE_MICRO_USD"
@@ -326,6 +345,7 @@ function validateTruth(value: Record<string, unknown>, label: string): DemoTruth
     truthLabel: DEMO_TRUTH_LABEL,
     provenance: {
       origin: "SYNTHETIC_DETERMINISTIC_FIXTURE",
+      governorCore: "GOVERNOR_CORE_ENFORCED",
       externalApiCalls: 0,
       usageSource: "SIMULATED",
       costBasis: "SIMULATED_LIST_PRICE_MICRO_USD"
@@ -502,7 +522,8 @@ function toDetailedEvent(value: unknown): RunEvent {
     typeof event.detail !== "string" ||
     !isRecord(event.metrics) ||
     !isRecord(event.risk) ||
-    !isRiskBand(event.risk.band)
+    !isRiskBand(event.risk.band) ||
+    event.risk.engine !== "GOVERNOR_CORE"
   ) {
     throw new ApiError("Run event did not match the demo contract.");
   }
@@ -547,6 +568,37 @@ function toDetailedEvent(value: unknown): RunEvent {
       source: event.action.source
     };
   }
+  let requestAdmission: RequestAdmission | undefined;
+  if (event.requestAdmission) {
+    if (
+      !isRecord(event.requestAdmission) ||
+      (event.requestAdmission.phase !== "work" &&
+        event.requestAdmission.phase !== "final")
+    ) {
+      throw new ApiError(
+        "Run event contained an invalid governor admission."
+      );
+    }
+    requestAdmission = {
+      phase: event.requestAdmission.phase,
+      exactInputTokens: requireInteger(
+        event.requestAdmission.exactInputTokens,
+        "Run admission exactInputTokens"
+      ),
+      requestedMaxOutputTokens: requireInteger(
+        event.requestAdmission.requestedMaxOutputTokens,
+        "Run admission requestedMaxOutputTokens"
+      ),
+      minimumUsefulOutputTokens: requireInteger(
+        event.requestAdmission.minimumUsefulOutputTokens,
+        "Run admission minimumUsefulOutputTokens"
+      ),
+      admittedMaxOutputTokens: requireInteger(
+        event.requestAdmission.admittedMaxOutputTokens,
+        "Run admission admittedMaxOutputTokens"
+      )
+    };
+  }
 
   return {
     id: event.id,
@@ -583,6 +635,7 @@ function toDetailedEvent(value: unknown): RunEvent {
       )
     },
     drivers: drivers?.length ? drivers : undefined,
+    requestAdmission,
     action
   };
 }

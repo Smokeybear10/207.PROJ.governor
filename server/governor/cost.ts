@@ -176,7 +176,7 @@ export const GPT_5_4_MINI_STANDARD_RATE_CARD = createRateCard({
   version: "openai-gpt-5.4-mini-standard-2026-07-18",
   currency: "USD",
   effectiveAt: "2026-07-18T00:00:00.000Z",
-  source: "https://platform.openai.com/docs/pricing",
+  source: "https://developers.openai.com/api/docs/pricing",
   rates: {
     uncachedInputMicroUsdPerMillionTokens: 750_000,
     cachedInputMicroUsdPerMillionTokens: 75_000,

@@ -6,9 +6,12 @@ import {
 } from "../server/openai/index.js";
 import {
   MAX_ARGUMENT_BYTES,
+  MAX_FINAL_EXPLANATION_BYTES,
+  MAX_FINAL_FINDINGS,
   MAX_OUTPUT_BYTES,
   MAX_OUTPUT_DEPTH,
-  MAX_OUTPUT_NODES
+  MAX_OUTPUT_NODES,
+  parseFinalReviewOutput
 } from "../server/openai/response-output.js";
 
 const reasoning = {
@@ -17,6 +20,13 @@ const reasoning = {
   status: "completed",
   summary: [],
   encrypted_content: "opaque-reasoning"
+};
+
+const reasoningWithoutEncryptedContent = {
+  id: "rs_1",
+  type: "reasoning",
+  status: "completed",
+  summary: []
 };
 
 function call(overrides: Record<string, unknown> = {}) {
@@ -44,6 +54,19 @@ function message(text = "Final review") {
         annotations: []
       }
     ]
+  };
+}
+
+function finalFinding(overrides: Record<string, unknown> = {}) {
+  return {
+    category: "correctness",
+    severity: "P1",
+    path: "src/retry.ts",
+    start_line: 2,
+    end_line: 2,
+    explanation: "The retry boundary admits one extra attempt.",
+    suggested_mitigation: "Use the configured retry limit.",
+    ...overrides
   };
 }
 
@@ -89,6 +112,74 @@ describe("Responses output protocol", () => {
         }
       ])
     ).toBe("First second");
+  });
+
+  it("parses bounded structured findings and the explicit clean variant", () => {
+    expect(
+      parseFinalReviewOutput([
+        message(
+          JSON.stringify({
+            status: "findings",
+            findings: [finalFinding()]
+          })
+        )
+      ])
+    ).toMatchObject({
+      review: {
+        status: "findings",
+        findings: [finalFinding()]
+      }
+    });
+    expect(
+      parseFinalReviewOutput([
+        message(JSON.stringify({ status: "clean" }))
+      ])
+    ).toMatchObject({
+      review: { status: "clean" }
+    });
+  });
+
+  it.each([
+    "not JSON",
+    JSON.stringify({ status: "clean", findings: [] }),
+    JSON.stringify({ status: "findings", findings: [] }),
+    JSON.stringify({
+      status: "findings",
+      findings: [finalFinding({ start_line: 0 })]
+    }),
+    JSON.stringify({
+      status: "findings",
+      findings: [finalFinding({ start_line: 3, end_line: 2 })]
+    }),
+    JSON.stringify({
+      status: "findings",
+      findings: [
+        finalFinding({
+          explanation: "x".repeat(MAX_FINAL_EXPLANATION_BYTES + 1)
+        })
+      ]
+    }),
+    JSON.stringify({
+      status: "findings",
+      findings: Array.from(
+        { length: MAX_FINAL_FINDINGS + 1 },
+        () => finalFinding()
+      )
+    })
+  ])("rejects malformed structured final review %#", (text) => {
+    expect(() => parseFinalReviewOutput([message(text)])).toThrow(
+      ResponseOutputError
+    );
+  });
+
+  it.each([
+    reasoningWithoutEncryptedContent,
+    { ...reasoning, encrypted_content: "" },
+    { ...reasoning, encrypted_content: "   " }
+  ])("requires nonempty encrypted reasoning content %#", (item) => {
+    expect(() => parseWorkOutput([item, call()])).toThrow(
+      "Reasoning item requires encrypted_content"
+    );
   });
 
   it.each([
