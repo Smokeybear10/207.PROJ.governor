@@ -222,10 +222,11 @@ adapters. `server/main.ts` is the executable API entry point;
 
 ## Production deployment
 
-The Vercel deployment exposes the dashboard and deterministic `/api/demo/*`
-walkthrough only. It forces the provider off, makes no external model calls,
-and does not present the in-memory `/v1/jobs` POC as a durable hosted service.
-Run the local service for governed-job and optional live-provider experiments.
+The Vercel deployment exposes the dashboard, deterministic `/api/demo/*`
+walkthrough, and fake-only `/api/repair/runs` fixture. It makes no external
+model calls and does not present the in-memory `/v1/jobs` POC as a durable
+hosted service. Run the local service for governed-job and optional
+live-provider experiments.
 
 ## Run locally
 

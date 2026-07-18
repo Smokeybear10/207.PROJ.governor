@@ -39,7 +39,9 @@ const MODE_LABELS: Record<RepairMode, string> = {
   live: "Live"
 };
 
-const MODE_ORDER: RepairMode[] = ["fake", "hybrid", "live"];
+const MODE_ORDER: RepairMode[] = import.meta.env.DEV
+  ? ["fake", "hybrid", "live"]
+  : ["fake"];
 
 const DEFAULT_FIXTURE = "broken-sum";
 const DEFAULT_MODE: RepairMode = "fake";
@@ -154,7 +156,7 @@ function ModeSelect({
         <select
           name="mode"
           value={value}
-          disabled={disabled}
+          disabled={disabled || MODE_ORDER.length === 1}
           onChange={(event) => onChange(event.target.value as RepairMode)}
         >
           {MODE_ORDER.map((mode) => (

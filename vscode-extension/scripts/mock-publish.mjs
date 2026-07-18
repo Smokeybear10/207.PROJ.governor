@@ -55,7 +55,7 @@ function humanBytes(bytes) {
 }
 
 console.log("──────────────────────────────────────────────");
-console.log(" TokenGovernor — VS Code Marketplace deployment ");
+console.log(" Governor 207 - VS Code Marketplace deployment ");
 console.log("──────────────────────────────────────────────");
 
 // --- Read manifest -----------------------------------------------------------

@@ -996,8 +996,11 @@ async function readError(response: Response): Promise<ApiError> {
   return new ApiError(message || "The request failed.", response.status);
 }
 
-function withTimeout(signal?: AbortSignal): AbortSignal {
-  const timeoutSignal = AbortSignal.timeout(10_000);
+function withTimeout(
+  signal?: AbortSignal,
+  timeoutMilliseconds = 10_000
+): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMilliseconds);
   return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 }
 
@@ -1161,7 +1164,7 @@ export async function createRepairRun(
       "Content-Type": "application/json"
     },
     body: JSON.stringify(input),
-    signal: withTimeout(signal)
+    signal: withTimeout(signal, 30_000)
   });
 
   if (!response.ok) {

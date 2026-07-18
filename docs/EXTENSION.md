@@ -1,6 +1,6 @@
-# TokenGovernor Extension (VS Code / Cursor)
+# Governor 207 Extension (VS Code / Cursor)
 
-Live cockpit for the governor, inside the editor. Talks to the TokenGovernor
+Live cockpit for the governor, inside the editor. Talks to the Governor
 API (`/v1/jobs`, `/api/repair/runs`) and shows spend, reservations, and risk
 live while work runs through the governor.
 
@@ -26,6 +26,8 @@ live while work runs through the governor.
    render live.
 
 ## Install the packaged build
+
+Building the extension requires Node.js 22.
 
 ```bash
 cd vscode-extension
@@ -55,7 +57,7 @@ activation so it's self-contained (no terminal needed).
 ## To publish to a marketplace (needs your accounts)
 
 1. **Publisher identity** — VS Code Marketplace (Azure DevOps org + registered
-   publisher; current `publisher: "ramp-hackathon"` is a placeholder) **or**
+   publisher; the package currently uses `publisher: "governor"`) **or**
    Open VSX (namespace + Eclipse account).
 2. **Personal Access Token** (`VSCE_PAT`) — tied to your account; paste into a
    GitHub Actions secret or shell env. Never committed.

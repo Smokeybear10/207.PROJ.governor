@@ -1,7 +1,7 @@
 # Intervention Checklist — Pitch Language vs. Implementation
 
 Teammate notes, translated into plain English for the pitch and judge Q&A.
-Each line maps to a mechanism in [`docs/TOKEN_GOVERNOR.md`](../TOKEN_GOVERNOR.md)
+Each line maps to a mechanism in [`docs/GOVERNOR.md`](../GOVERNOR.md)
 section 15 (Intervention Catalog) and section 11 (Cost Accounting). Status is
 checked against the current code, not the spec, so this drifts as we build —
 recheck before quoting a status in the demo.

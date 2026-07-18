@@ -56,7 +56,7 @@ these three need to be dropped rather than discovering it at 2:45.
 
 ## Azdeen — caveats and pitch
 
-- [ ] 90-second finalist script (docs/TOKEN_GOVERNOR.md section 20 as the base)
+- [ ] 90-second finalist script (`docs/GOVERNOR.md` section 20 as the base)
 - [ ] Judge Q&A prep (sections 27 and 30)
 - [ ] Truth-boundary language: synthetic vs live, safe claims only
       (section 31)

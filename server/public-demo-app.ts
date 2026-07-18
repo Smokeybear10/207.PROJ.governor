@@ -4,5 +4,6 @@ import { createApp } from "./app.js";
 // an explicit local operation.
 export const publicDemoApp = createApp({
   provider: null,
-  exposeGovernedApi: false
+  exposeGovernedApi: false,
+  forcedRepairMode: "fake"
 });

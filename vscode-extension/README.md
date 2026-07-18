@@ -1,12 +1,12 @@
-# TokenGovernor for VS Code
+# Governor 207 for VS Code
 
 Budget control for AI jobs inside the editor. The extension talks to the
-TokenGovernor API (`/v1/jobs`) and shows spend, reservations, and risk live
+Governor API (`/v1/jobs`) and shows spend, reservations, and risk live
 while work runs through the governor.
 
 ## Overview
 
-TokenGovernor is a spend firewall for AI agents. Every model call is routed
+Governor is a spend firewall for AI agents. Every model call is routed
 through a deterministic **count → price → reserve → cap → dispatch → settle**
 pipeline: it measures the exact input size for free, holds the worst-case cost
 against a fixed budget, caps the output length, dispatches, then refunds the

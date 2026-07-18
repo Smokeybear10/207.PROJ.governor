@@ -47,7 +47,8 @@ describe("Governor API", () => {
   it("can limit a deployment to deterministic demo routes", async () => {
     const baseUrl = await startApp({
       provider: null,
-      exposeGovernedApi: false
+      exposeGovernedApi: false,
+      forcedRepairMode: "fake"
     });
     const health = await fetch(`${baseUrl}/api/health`);
     const jobs = await fetch(`${baseUrl}/v1/jobs`, { method: "POST" });
@@ -60,6 +61,38 @@ describe("Governor API", () => {
     expect(await jobs.json()).toMatchObject({
       error: { code: "NOT_FOUND" }
     });
+  });
+
+  it("forces hosted repair runs to use the deterministic provider", async () => {
+    const baseUrl = await startApp({
+      provider: null,
+      exposeGovernedApi: false,
+      forcedRepairMode: "fake"
+    });
+    const rejected = await fetch(`${baseUrl}/api/repair/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtureId: "broken-sum", mode: "live" })
+    });
+
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({
+      error: { code: "REPAIR_MODE_NOT_AVAILABLE" }
+    });
+
+    const accepted = await fetch(`${baseUrl}/api/repair/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtureId: "broken-sum" })
+    });
+    const body = (await accepted.json()) as {
+      mode: string;
+      result: { status: string };
+    };
+
+    expect(accepted.status).toBe(201);
+    expect(body.mode).toBe("fake");
+    expect(body.result.status).toBe("repaired");
   });
 
   it("returns the strictly labeled deterministic catalog", async () => {

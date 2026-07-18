@@ -19,6 +19,7 @@ export type CreateAppOptions = {
   readonly jobIdFactory?: () => string;
   readonly now?: () => Date;
   readonly exposeGovernedApi?: boolean;
+  readonly forcedRepairMode?: ProviderMode;
 };
 
 function applySecurityHeaders(
@@ -166,6 +167,21 @@ export function createApp(options: CreateAppOptions = {}): Express {
       next(new ApiError("INVALID_PROVIDER_MODE", errorMessage(error), 400));
       return;
     }
+    if (
+      options.forcedRepairMode !== undefined &&
+      mode !== undefined &&
+      mode !== options.forcedRepairMode
+    ) {
+      next(
+        new ApiError(
+          "REPAIR_MODE_NOT_AVAILABLE",
+          `This deployment only supports "${options.forcedRepairMode}" repair mode.`,
+          400
+        )
+      );
+      return;
+    }
+    mode = options.forcedRepairMode ?? mode;
     runRepairDemo({ fixtureId, mode })
       .then((result) => {
         response.status(201).json(result);

@@ -6,6 +6,8 @@ whole pipeline can run in CI without any Marketplace secret.
 
 ## Package the extension
 
+Use Node.js 22 for extension build and test tooling.
+
 ```bash
 npm run package
 ```

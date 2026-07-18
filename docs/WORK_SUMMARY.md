@@ -1,4 +1,4 @@
-# TokenGovernor — Work Summary
+# Governor 207 - Work Summary
 
 A spend firewall for AI agents. Every model call goes through a deterministic
 **count → price → reserve → cap → dispatch → settle** pipeline, so cost is
@@ -6,7 +6,7 @@ enforced before the call, not discovered after it.
 
 ## Architecture (4 layers)
 
-1. **Frontend** — React dashboard (`src/`): job monitor, Brand Studio, CI-Repair panel.
+1. **Frontend** - React operations dashboard and CI-Repair panel (`src/`).
 2. **Shared API** — Express app (`server/app.ts`): `/api/repair/runs`, `/v1/jobs*`, uniform JSON error envelope.
 3. **Repair layer** (`server/repair/**`) — governed autonomous CI-repair agent.
 4. **Governor service** (`server/jobs/service.ts`) — the single spend authority; count/price/reserve/cap/dispatch/settle over `server/governor/**` + `server/runtime/**`.
@@ -22,9 +22,10 @@ enforced before the call, not discovered after it.
 ## Verification
 
 - `npx tsc --noEmit`: clean.
-- `npx vitest run`: **233/233** passing (22 files).
+- `npx vitest run`: **238/238** passing (23 files).
 - `vite build`: clean.
-- Extension: typecheck clean, 7/7 unit tests, mock-publish + VSIX package OK.
+- Extension: typecheck clean, 7/7 unit tests, 2/2 VS Code integration tests,
+  zero audit findings, and VSIX package OK.
 - Live smoke: `POST /api/repair/runs` (fake `broken-sum`) → `201 repaired`, sealed eval passed, spend ~$0.0045.
 
 ## How it saves money (cost-control tactics)
