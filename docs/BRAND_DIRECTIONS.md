@@ -4,6 +4,11 @@ The product name is **Governor**. Internal compatibility identifiers such as
 `token-governor`, `token_governor.job`, and the existing CLI filename can remain
 unchanged until a deliberate API migration.
 
+The interactive design picker is available at `/brand` while the local
+development server is running. It includes ten complete identity directions,
+category filters, a three-way comparison, local choice persistence, and a
+downloadable decision record.
+
 ![Governor logo exploration](../public/brand/governor-brand-board.png)
 
 ## Recommended Direction: Aperture G

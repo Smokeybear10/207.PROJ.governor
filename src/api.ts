@@ -253,6 +253,9 @@ const EVENT_PRESENTATION: Record<string, { phase: string; kind: string }> = {
   RUN_STOPPED: { phase: "STOP", kind: "POLICY" }
 };
 
+const MAX_SCRIPTED_EVENTS = 250;
+const MAX_SCRIPTED_OFFSET_MS = 10 * 60 * 1_000;
+
 export class ApiError extends Error {
   readonly status: number;
 
@@ -532,6 +535,12 @@ function toDetailedEvent(value: unknown): RunEvent {
     phase: "TRACE",
     kind: event.type
   };
+  if (
+    event.risk.observedDrivers !== undefined &&
+    !Array.isArray(event.risk.observedDrivers)
+  ) {
+    throw new ApiError("Run event contained invalid risk drivers.");
+  }
   const drivers = event.risk.observedDrivers?.map((driver) => {
     if (
       !isRecord(driver) ||
@@ -736,6 +745,26 @@ function normalizeDetailedRun(value: Record<string, unknown>): RunTrace {
   if (events.length === 0) {
     throw new ApiError("Run response did not include a scripted event trace.");
   }
+  if (events.length > MAX_SCRIPTED_EVENTS) {
+    throw new ApiError("Run response contained too many scripted events.");
+  }
+  const eventIds = new Set<string>();
+  let previousOffset = -1;
+  for (const event of events) {
+    if (eventIds.has(event.id)) {
+      throw new ApiError("Run response contained duplicate event IDs.");
+    }
+    if (
+      event.offsetMs <= previousOffset ||
+      event.offsetMs > MAX_SCRIPTED_OFFSET_MS
+    ) {
+      throw new ApiError(
+        "Run response contained an invalid scripted event timeline."
+      );
+    }
+    eventIds.add(event.id);
+    previousOffset = event.offsetMs;
+  }
   const finalMetrics = events[events.length - 1]?.metrics;
   if (value.status !== "COMPLETED" && value.status !== "POLICY_STOPPED") {
     throw new ApiError("Run response contained an invalid terminal status.");
@@ -806,9 +835,13 @@ function normalizeDetailedRun(value: Record<string, unknown>): RunTrace {
   };
 }
 
-function validateRunTrace(value: unknown): RunTrace {
+function validateRunTrace(
+  value: unknown,
+  expected: CreateDemoRunInput
+): RunTrace {
   if (
     !isRecord(value) ||
+    value.version !== 1 ||
     value.mode !== "DEMO" ||
     typeof value.id !== "string" ||
     !Array.isArray(value.events)
@@ -818,7 +851,26 @@ function validateRunTrace(value: unknown): RunTrace {
     );
   }
 
-  return normalizeDetailedRun(value);
+  if (
+    value.scenarioId !== expected.scenarioId ||
+    value.controller !== expected.controller
+  ) {
+    throw new ApiError(
+      "Run response identity did not match the requested scenario and controller."
+    );
+  }
+
+  const trace = normalizeDetailedRun(value);
+  if (
+    trace.scenario.id !== expected.scenarioId ||
+    trace.controller !== expected.controller
+  ) {
+    throw new ApiError(
+      "Run response scenario did not match the requested demo operation."
+    );
+  }
+
+  return trace;
 }
 
 async function readError(response: Response): Promise<ApiError> {
@@ -877,5 +929,5 @@ export async function createDemoRun(
     throw await readError(response);
   }
 
-  return validateRunTrace(await response.json());
+  return validateRunTrace(await response.json(), input);
 }
