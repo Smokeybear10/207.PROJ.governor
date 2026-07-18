@@ -39,6 +39,10 @@ gamed.
   - Open Job View
   - Submit Selection Through Governor (sends the editor selection as the
     model input for a `work` or `final` response)
+  - Send Prompt Through Governor (type a prompt, it runs through the
+    governed job, and the answer opens in a markdown tab beside your code
+    with the token counts and reserved/settled cost at the top; offers to
+    create a job if none is active)
   - Finalize Pending Response (accept/reject a settled final output)
   - Run Governed CI-Repair (runs the repair agent on a fixture under budget)
 

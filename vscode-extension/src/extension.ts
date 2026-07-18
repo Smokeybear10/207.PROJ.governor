@@ -23,6 +23,7 @@ type PanelAction =
   | "createJob"
   | "setActiveJob"
   | "submitSelection"
+  | "sendPrompt"
   | "finalize"
   | "runRepair"
   | "refresh";
@@ -60,6 +61,34 @@ type JobView = {
   pending_final_validation_request_id: string | null;
   completion_accepted: boolean | null;
   requests: JobRequestSummary[];
+};
+
+type SubmissionResponse = {
+  model: string;
+  status: string;
+  output: unknown[];
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+  } | null;
+};
+
+type SubmissionExecution = {
+  status: string;
+  reason?: string;
+  response?: SubmissionResponse | null;
+  reservation?: {
+    exact_input_tokens: number;
+    max_output_tokens: number;
+    reserved_usd: string;
+    settled_usd: string | null;
+  };
+};
+
+type ResponseSubmission = {
+  execution: SubmissionExecution;
+  job: JobView;
 };
 
 class GovernorApiError extends Error {
@@ -165,6 +194,87 @@ function escapeHtml(value: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// Pulls the plain text out of a Responses API output array: message items
+// whose content pieces are typed "output_text". Work-phase outputs can also
+// carry function-call items; those have no text and are skipped here.
+function collectOutputText(output: unknown[]): string {
+  const parts: string[] = [];
+  for (const item of output) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (const piece of content) {
+      if (
+        typeof piece === "object" &&
+        piece !== null &&
+        (piece as { type?: unknown }).type === "output_text" &&
+        typeof (piece as { text?: unknown }).text === "string"
+      ) {
+        parts.push((piece as { text: string }).text);
+      }
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+function promptResultMarkdown(
+  jobId: string,
+  requestId: string,
+  phase: string,
+  prompt: string,
+  submission: ResponseSubmission
+): string {
+  const execution = submission.execution;
+  const response = execution.response ?? null;
+  const reservation = execution.reservation;
+  const lines = [
+    `# Governor response \`${requestId}\``,
+    "",
+    `- Job: \`${jobId}\``,
+    `- Phase: ${phase}`,
+    `- Execution: ${execution.status}${execution.reason ? ` (${execution.reason})` : ""}`
+  ];
+  if (response) {
+    lines.push(`- Model: ${response.model}`);
+    if (response.usage) {
+      lines.push(
+        `- Tokens: ${response.usage.input_tokens} in / ${response.usage.output_tokens} out`
+      );
+    }
+  }
+  if (reservation) {
+    lines.push(
+      `- Reserved: ${usd(reservation.reserved_usd)}` +
+        (reservation.settled_usd === null
+          ? " (not settled)"
+          : `, settled: ${usd(reservation.settled_usd)}`)
+    );
+  }
+  lines.push("", "## Prompt", "", prompt, "", "## Answer", "");
+  const answer = response === null ? "" : collectOutputText(response.output);
+  if (answer) {
+    lines.push(answer);
+  } else if (response) {
+    lines.push(
+      "The response contained no plain text output. Raw output:",
+      "",
+      "```json",
+      JSON.stringify(response.output, null, 2),
+      "```"
+    );
+  } else {
+    lines.push(
+      "No provider response is available for this outcome. Check the " +
+        "TokenGovernor output channel and the job panel."
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function nonce(): string {
@@ -332,6 +442,7 @@ function shellHtml(webview: vscode.Webview): string {
     <button data-action="createJob">Create Job</button>
     <button data-action="setActiveJob">Switch Job</button>
     <button data-action="submitSelection">Submit Selection</button>
+    <button data-action="sendPrompt">Send Prompt</button>
     <button data-action="finalize">Finalize</button>
     <button data-action="healthCheck">Health</button>
     <button class="ghost" data-action="refresh" title="Refresh">↻</button>
@@ -846,6 +957,92 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
     )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("tokenGovernor.sendPrompt", async () => {
+      let jobId = activeJobId();
+      if (!jobId) {
+        const create = await vscode.window.showWarningMessage(
+          "No active governor job. Create one to send this prompt through it.",
+          "Create Job"
+        );
+        if (create !== "Create Job") {
+          return;
+        }
+        await vscode.commands.executeCommand("tokenGovernor.createJob");
+        jobId = activeJobId();
+        if (!jobId) {
+          return;
+        }
+      }
+      const prompt = await vscode.window.showInputBox({
+        title: "Governor: prompt",
+        prompt: "Sent as the model input through the active governed job",
+        placeHolder: "Ask the model something..."
+      });
+      if (!prompt || prompt.trim() === "") {
+        return;
+      }
+      const phase = await vscode.window.showQuickPick(["work", "final"], {
+        title: "Governor: response phase"
+      });
+      if (phase !== "work" && phase !== "final") {
+        return;
+      }
+
+      const requestId = `${phase}:${Date.now()}`;
+      const jobPath = encodeURIComponent(jobId);
+      try {
+        const submission = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `Governor: dispatching ${requestId}...`
+          },
+          () =>
+            apiRequest<ResponseSubmission>(`/v1/jobs/${jobPath}/responses`, {
+              method: "POST",
+              body: JSON.stringify({
+                request_id: requestId,
+                phase,
+                input: prompt
+              })
+            })
+        );
+        output.appendLine(
+          `prompt ${requestId}: ${JSON.stringify(submission, null, 2)}`
+        );
+        void refresh();
+        const document = await vscode.workspace.openTextDocument({
+          language: "markdown",
+          content: promptResultMarkdown(
+            jobId,
+            requestId,
+            phase,
+            prompt,
+            submission
+          )
+        });
+        await vscode.window.showTextDocument(document, {
+          preview: false,
+          viewColumn: vscode.ViewColumn.Beside
+        });
+      } catch (error) {
+        void refresh();
+        if (error instanceof GovernorApiError) {
+          output.appendLine(
+            `prompt ${requestId} refused: [${error.code}] ${error.message}`
+          );
+          void vscode.window.showWarningMessage(
+            `Governor refused ${requestId} (${error.code}): ${error.message}`
+          );
+          return;
+        }
+        void vscode.window.showErrorMessage(
+          error instanceof Error ? error.message : "Prompt submission failed."
+        );
+      }
+    })
   );
 
   context.subscriptions.push(

@@ -43,6 +43,11 @@
         "title": "Submit Selection Through Governor"
       },
       {
+        "command": "tokenGovernor.sendPrompt",
+        "category": "Governor",
+        "title": "Send Prompt Through Governor"
+      },
+      {
         "command": "tokenGovernor.finalize",
         "category": "Governor",
         "title": "Finalize Pending Response"
