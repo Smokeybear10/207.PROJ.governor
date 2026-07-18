@@ -94,7 +94,23 @@ describe("RepairClient.runRepair", () => {
 
   it("applies default fixtureId and mode when no input is given", async () => {
     const fetchImpl = vi.fn(async () =>
-      jsonResponse(201, { result: { status: "not_repaired" } })
+      jsonResponse(201, {
+        fixtureId: "broken-sum",
+        mode: "fake",
+        model: "test-model",
+        rateCardVersion: "2024-01",
+        policy: {},
+        result: {
+          status: "not_repaired",
+          reason: "MAX_RESPONSES_REACHED",
+          finalText: null,
+          evaluation: null,
+          toolCalls: 0,
+          revision: "rev-0",
+          settledMicroUsd: 0,
+          trace: []
+        }
+      })
     );
     const client = new RepairClient({
       baseUrl: "http://localhost:8787",
@@ -109,11 +125,25 @@ describe("RepairClient.runRepair", () => {
       fixtureId: "broken-sum",
       mode: "fake"
     });
-    // defensive normalization tolerates missing optional fields
     expect(out.result.finalText).toBeNull();
     expect(out.result.evaluation).toBeNull();
-    expect(out.result.settledMicroUsd).toBeUndefined();
+    expect(out.result.settledMicroUsd).toBe(0);
     expect(out.result.trace).toEqual([]);
+  });
+
+  it("rejects a malformed successful response", async () => {
+    const client = new RepairClient({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: vi.fn(async () =>
+        jsonResponse(201, { result: { status: "repaired" } })
+      ) as unknown as typeof fetch
+    });
+
+    await expect(client.runRepair()).rejects.toMatchObject({
+      name: "GovernorApiError",
+      status: 200,
+      code: "INVALID_RESPONSE"
+    });
   });
 
   it("throws a GovernorApiError carrying the server code on non-2xx", async () => {

@@ -1,8 +1,8 @@
 {
   "name": "token-governor-vscode",
   "displayName": "Governor",
-  "description": "Budget control for AI jobs inside the editor: watch spend, reservations, and risk live, and run governed CI-repair — all capped by the Governor.",
-  "version": "0.1.0",
+  "description": "Local budget control for AI jobs inside the editor: watch spend, reservations, and risk live, and run governed CI-repair — all capped by Governor.",
+  "version": "0.2.0",
   "private": true,
   "publisher": "governor",
   "icon": "media/icon.png",
@@ -62,6 +62,16 @@
         "command": "tokenGovernor.runRepair",
         "category": "Governor",
         "title": "Run Governed CI-Repair"
+      },
+      {
+        "command": "tokenGovernor.setOpenAiApiKey",
+        "category": "Governor",
+        "title": "Set OpenAI API Key"
+      },
+      {
+        "command": "tokenGovernor.clearOpenAiApiKey",
+        "category": "Governor",
+        "title": "Clear OpenAI API Key"
       }
     ],
     "viewsContainers": {
@@ -88,7 +98,19 @@
         "tokenGovernor.apiBaseUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8787",
-          "description": "Base URL of the TokenGovernor API server."
+          "description": "Base URL of the Governor API. The packaged local service is managed automatically for a loopback HTTP URL."
+        },
+        "tokenGovernor.autoStartLocalServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start and stop the packaged Governor service for a loopback API URL."
+        },
+        "tokenGovernor.requestTimeoutMs": {
+          "type": "number",
+          "default": 70000,
+          "minimum": 1000,
+          "maximum": 300000,
+          "description": "Maximum time to wait for a Governor API request, in milliseconds."
         },
         "tokenGovernor.pollIntervalMs": {
           "type": "number",
@@ -115,12 +137,12 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p .",
+    "compile": "node scripts/build.mjs",
     "watch": "tsc -w -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
     "test:vscode": "npm run compile && node ./out/test/runTest.js",
-    "build": "tsc -p .",
+    "build": "npm run compile",
     "package": "npm run build && vsce package --no-dependencies -o token-governor-vscode.vsix",
     "publish:mock": "node scripts/mock-publish.mjs"
   },
@@ -130,10 +152,15 @@
     "@types/vscode": "1.85.0",
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.9.2",
+    "esbuild": "0.28.1",
+    "express": "5.2.1",
     "glob": "^13.0.6",
+    "iconv-lite": "0.7.3",
+    "mime-types": "3.0.2",
     "mocha": "^11.7.6",
     "typescript": "5.9.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "zod": "4.4.3"
   },
   "overrides": {
     "mocha": {

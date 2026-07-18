@@ -1,6 +1,7 @@
 import express, {
   type ErrorRequestHandler,
   type Express,
+  type NextFunction,
   type Request,
   type Response
 } from "express";
@@ -13,6 +14,7 @@ import { OpenAiResponsesClient } from "./openai/index.js";
 import type { ResponsesProvider } from "./runtime/index.js";
 
 const BODY_LIMIT = "256kb";
+const LOOPBACK_REQUEST_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 export type CreateAppOptions = {
   readonly provider?: ResponsesProvider | null;
@@ -39,6 +41,76 @@ function applySecurityHeaders(
     "X-Frame-Options": "DENY"
   });
   next();
+}
+
+function requestHostname(hostHeader: string | undefined): string | null {
+  if (hostHeader === undefined) {
+    return null;
+  }
+  try {
+    const parsed = new URL(`http://${hostHeader}`);
+    if (parsed.username || parsed.password || parsed.pathname !== "/") {
+      return null;
+    }
+    return parsed.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function requireLocalRequest(
+  request: Request,
+  _response: Response,
+  next: NextFunction
+): void {
+  const hostname = requestHostname(request.headers.host);
+  if (hostname === null || !LOOPBACK_REQUEST_HOSTS.has(hostname)) {
+    next(
+      new ApiError(
+        "HOST_NOT_ALLOWED",
+        "The local Governor API accepts loopback Host headers only.",
+        403
+      )
+    );
+    return;
+  }
+  if (request.headers.origin !== undefined) {
+    next(
+      new ApiError(
+        "BROWSER_ORIGIN_NOT_ALLOWED",
+        "Browser-origin requests are not accepted by the local Governor API.",
+        403
+      )
+    );
+    return;
+  }
+  next();
+}
+
+function requestCancellation(
+  request: Request,
+  response: Response
+): { readonly signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController();
+  const abort = (): void => {
+    if (!controller.signal.aborted) {
+      controller.abort(new Error("The API client disconnected."));
+    }
+  };
+  const close = (): void => {
+    if (!response.writableEnded) {
+      abort();
+    }
+  };
+  request.once("aborted", abort);
+  response.once("close", close);
+  return {
+    signal: controller.signal,
+    dispose(): void {
+      request.off("aborted", abort);
+      response.off("close", close);
+    }
+  };
 }
 
 const handleError: ErrorRequestHandler = (
@@ -125,6 +197,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   });
   app.disable("x-powered-by");
   app.use(applySecurityHeaders);
+  app.use(requireLocalRequest);
   app.use(express.json({ limit: BODY_LIMIT }));
 
   app.get("/api/health", (_request, response) => {
@@ -147,7 +220,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
     response.status(201).json(createDemoRun(request.body));
   });
 
-  app.post("/api/repair/runs", (request, response, next) => {
+  app.post("/api/repair/runs", async (request, response, next) => {
     response.set("Cache-Control", "no-store");
     const body: unknown = request.body ?? {};
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
@@ -182,13 +255,23 @@ export function createApp(options: CreateAppOptions = {}): Express {
       return;
     }
     mode = options.forcedRepairMode ?? mode;
-    runRepairDemo({ fixtureId, mode })
-      .then((result) => {
-        response.status(201).json(result);
-      })
-      .catch((error: unknown) => {
-        next(new ApiError("REPAIR_RUN_FAILED", errorMessage(error), 400));
+    const cancellation = requestCancellation(request, response);
+    try {
+      const result = await runRepairDemo({
+        fixtureId,
+        mode,
+        signal: cancellation.signal
       });
+      if (!cancellation.signal.aborted) {
+        response.status(201).json(result);
+      }
+    } catch (error) {
+      if (!cancellation.signal.aborted) {
+        next(new ApiError("REPAIR_RUN_FAILED", errorMessage(error), 400));
+      }
+    } finally {
+      cancellation.dispose();
+    }
   });
 
   if (!exposeGovernedApi) {
@@ -221,13 +304,25 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   app.post(
     "/v1/jobs/:jobId/responses",
-    async (request, response) => {
+    async (request, response, next) => {
       response.set("Cache-Control", "no-store");
-      const result = await jobs.createResponse(
-        request.params.jobId,
-        request.body
-      );
-      response.status(result.statusCode).json(result.body);
+      const cancellation = requestCancellation(request, response);
+      try {
+        const result = await jobs.createResponse(
+          request.params.jobId,
+          request.body,
+          cancellation.signal
+        );
+        if (!cancellation.signal.aborted) {
+          response.status(result.statusCode).json(result.body);
+        }
+      } catch (error) {
+        if (!cancellation.signal.aborted) {
+          next(error);
+        }
+      } finally {
+        cancellation.dispose();
+      }
     }
   );
 

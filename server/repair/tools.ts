@@ -320,8 +320,8 @@ export function createRepairToolbox(
     });
   }
 
-  async function runTests(): Promise<string> {
-    const run = await sandbox.runTests();
+  async function runTests(signal?: AbortSignal): Promise<string> {
+    const run = await sandbox.runTests(signal);
     const reduced = reduceTestLog(run.stdout, run.exitCode);
     const artifact = await artifactStore.putText(reduced.text);
     return serializeCapped(
@@ -340,7 +340,11 @@ export function createRepairToolbox(
     );
   }
 
-  async function execute(name: string, args: unknown): Promise<string> {
+  async function execute(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ): Promise<string> {
     switch (name as RepairToolName) {
       case "list_files":
         parseArguments(emptyArgumentsSchema, args);
@@ -351,7 +355,7 @@ export function createRepairToolbox(
         return applyPatch(parseArguments(applyPatchArgumentsSchema, args));
       case "run_tests":
         parseArguments(emptyArgumentsSchema, args);
-        return runTests();
+        return runTests(signal);
       default:
         throw new RepairToolError(
           "UNKNOWN_TOOL",

@@ -27,6 +27,15 @@ const TEST_TIMEOUT_MS = 30_000;
 /** Exit code reported when the test process is killed by our timeout or an abort. */
 const TIMEOUT_EXIT_CODE = 124;
 
+function cancellationError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) {
+    return signal.reason;
+  }
+  const error = new Error("The sandbox operation was cancelled.");
+  error.name = "AbortError";
+  return error;
+}
+
 function revisionOf(entries: Iterable<readonly [string, string]>): string {
   const hash = createHash("sha256");
   const sorted = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -92,6 +101,7 @@ function runPinnedTests(
 
     let settled = false;
     let killedByTimeout = false;
+    let killedByAbort = false;
 
     const cleanup = (): void => {
       clearTimeout(timer);
@@ -118,7 +128,7 @@ function runPinnedTests(
     }, TEST_TIMEOUT_MS);
 
     const onAbort = (): void => {
-      killedByTimeout = true;
+      killedByAbort = true;
       child.kill("SIGKILL");
     };
     if (signal) {
@@ -134,6 +144,10 @@ function runPinnedTests(
 
     child.on("error", (error) => fail(error));
     child.on("close", (code) => {
+      if (killedByAbort && signal) {
+        fail(cancellationError(signal));
+        return;
+      }
       finish({
         exitCode: killedByTimeout ? TIMEOUT_EXIT_CODE : code ?? TIMEOUT_EXIT_CODE,
         durationMs: Date.now() - start,

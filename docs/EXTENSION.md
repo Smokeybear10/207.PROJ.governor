@@ -4,6 +4,11 @@ Live cockpit for the governor, inside the editor. Talks to the Governor
 API (`/v1/jobs`, `/api/repair/runs`) and shows spend, reservations, and risk
 live while work runs through the governor.
 
+[Install Governor from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode)
+
+The VSIX contains the local Governor service. For the default loopback URL, the
+extension starts and stops that service automatically.
+
 ## UI
 
 - **Status bar**: committed spend / budget for the active job, colored by the
@@ -15,15 +20,19 @@ live while work runs through the governor.
   checks, and the full governed trace. Works in VS Code and Cursor.
 - **Commands** (Cmd+Shift+P, category "Governor"): Health Check · Create Job ·
   Set Active Job · Open Job View · Submit Selection Through Governor ·
-  Finalize Pending Response · Run Governed CI-Repair.
+  Send Prompt Through Governor · Finalize Pending Response · Run Governed
+  CI-Repair · Set/Clear OpenAI API Key.
 
 ## Try it locally
 
-1. Start the API from the repo root: `npm start` (needs to stay running).
+1. Install the Marketplace extension and reload the editor.
 2. Open the Governor view: click the Governor icon, or run
    **Governor: Open Job View**.
 3. Click **Run CI-Repair** — watch the verdict, spend (~$0.0045), and trace
-   render live.
+   render live. The deterministic repair mode requires no API key.
+4. To send prompts or selections through OpenAI, run
+   **Governor: Set OpenAI API Key**. The key is stored in VS Code Secret
+   Storage and the managed service restarts with it.
 
 ## Install the packaged build
 
@@ -43,27 +52,23 @@ Then reload the window (Cmd+Shift+P → Developer: Reload Window).
 ## Settings
 
 - `tokenGovernor.apiBaseUrl` (default `http://127.0.0.1:8787`)
+- `tokenGovernor.autoStartLocalServer` (default `true`)
+- `tokenGovernor.requestTimeoutMs` (default `70000`)
 - `tokenGovernor.pollIntervalMs` (default `2000`)
 - `tokenGovernor.defaultFixtureId` (default `broken-sum`)
 - `tokenGovernor.providerMode` (`fake` | `hybrid` | `live`, default `fake`)
 
-## Known dependency
+## Local boundary
 
-The extension is a **client to a local governor server**. If nothing is
-listening on `127.0.0.1:8787`, actions fail with a network error. Fix: run
-`npm start`. **In progress:** the extension will auto-start the server on
-activation so it's self-contained (no terminal needed).
+The packaged server binds only to loopback and rejects non-loopback Host
+headers and browser-origin requests. Job state remains in memory, so restarting
+the managed service clears prior jobs; the extension detects and removes those
+stale job IDs. A custom API URL or `autoStartLocalServer: false` leaves process
+management to the user.
 
-## To publish to a marketplace (needs your accounts)
+## Marketplace releases
 
-1. **Publisher identity** — VS Code Marketplace (Azure DevOps org + registered
-   publisher; the package currently uses `publisher: "governor"`) **or**
-   Open VSX (namespace + Eclipse account).
-2. **Personal Access Token** (`VSCE_PAT`) — tied to your account; paste into a
-   GitHub Actions secret or shell env. Never committed.
-3. **Metadata** — confirm display name, a 128×128 PNG icon, repo URL, license.
-
-Packaging + a CI `publish` job are already stubbed (`.github/workflows/extension.yml`,
-`vscode-extension/scripts/mock-publish.mjs`); flip to real with `PUBLISH_REAL=true`
-+ `VSCE_PAT`. The current deploy is a **mock** (`published: false`) — no live
-marketplace URL exists yet.
+The extension is live under publisher `governor`. CI tests and packages normal
+changes without publishing them. A tag matching the manifest version, such as
+`vscode-v0.2.0`, is the only automatic Marketplace release trigger and requires
+the repository `VSCE_PAT` secret.

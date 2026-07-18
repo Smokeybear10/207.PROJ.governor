@@ -44,6 +44,7 @@ export interface RepairResponseRequest {
   readonly maxOutputTokens: number;
   readonly minimumOutputTokens: number;
   readonly model?: string;
+  readonly signal?: AbortSignal;
 }
 
 /** Normalized outcome of a single governed response attempt. */
@@ -233,7 +234,11 @@ export function openRepairSession(
     };
 
     try {
-      const result = await service.createResponse(jobId, value);
+      const result = await service.createResponse(
+        jobId,
+        value,
+        request.signal
+      );
       return normalizeExecution(result.body.execution, getAccounting());
     } catch (error) {
       if (error instanceof ApiError) {

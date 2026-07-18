@@ -1,14 +1,36 @@
+import { randomBytes } from "node:crypto";
+import * as path from "node:path";
+
 import * as vscode from "vscode";
 import {
+  GovernorApiError,
+  GovernorHttpClient,
+  normalizeBaseUrl
+} from "./apiClient";
+import {
+  LocalGovernorServer,
+  type LocalServerStatus
+} from "./localServer";
+import {
   RepairClient,
-  GovernorApiError as RepairApiError,
   formatMicroUsd,
   type RepairRunResponse
 } from "./repairClient";
 
 const ACTIVE_JOB_KEY = "tokenGovernor.activeJobId";
 const KNOWN_JOBS_KEY = "tokenGovernor.knownJobIds";
+const OPENAI_API_KEY_SECRET = "tokenGovernor.openAiApiKey";
 const USD_PATTERN = /^(?:0|[1-9]\d{0,5})(?:\.\d{1,6})?$/;
+const PANEL_ACTIONS = new Set<PanelAction>([
+  "healthCheck",
+  "createJob",
+  "setActiveJob",
+  "submitSelection",
+  "sendPrompt",
+  "finalize",
+  "runRepair",
+  "refresh"
+]);
 
 // Mirrors DEFAULT_RISK_THRESHOLDS in server/governor/risk.ts. The jobs API
 // does not expose the shadow risk assessment yet, so the extension derives
@@ -91,22 +113,20 @@ type ResponseSubmission = {
   job: JobView;
 };
 
-class GovernorApiError extends Error {
-  readonly status: number;
-  readonly code: string;
-
-  constructor(message: string, status: number, code: string) {
-    super(message);
-    this.status = status;
-    this.code = code;
-  }
-}
-
 function apiBaseUrl(): string {
   const configured = vscode.workspace
     .getConfiguration("tokenGovernor")
     .get<string>("apiBaseUrl", "http://127.0.0.1:8787");
-  return configured.replace(/\/+$/, "");
+  return normalizeBaseUrl(configured);
+}
+
+function requestTimeoutMs(): number {
+  return Math.max(
+    1_000,
+    vscode.workspace
+      .getConfiguration("tokenGovernor")
+      .get<number>("requestTimeoutMs", 70_000)
+  );
 }
 
 function pollIntervalMs(): number {
@@ -118,40 +138,258 @@ function pollIntervalMs(): number {
   );
 }
 
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(`${apiBaseUrl()}${path}`, {
-      ...init,
-      headers: {
-        Accept: "application/json",
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...init?.headers
-      }
-    });
-  } catch (error) {
-    throw new GovernorApiError(
-      `Could not reach the governor at ${apiBaseUrl()}. Is the server running?`,
-      0,
-      "UNREACHABLE"
-    );
-  }
+async function apiRequest(
+  requestPath: string,
+  init?: RequestInit,
+  signal?: AbortSignal
+): Promise<unknown> {
+  const client = new GovernorHttpClient({
+    baseUrl: apiBaseUrl(),
+    timeoutMs: requestTimeoutMs()
+  });
+  return client.request(requestPath, init, signal);
+}
 
-  const body = (await response.json().catch(() => ({}))) as Record<
-    string,
-    unknown
-  >;
-  if (!response.ok) {
-    const errorValue = body.error as
-      | { message?: string; code?: string }
-      | undefined;
-    throw new GovernorApiError(
-      errorValue?.message ?? `Request failed with HTTP ${response.status}.`,
-      response.status,
-      errorValue?.code ?? `HTTP_${response.status}`
+function invalidApiResponse(pathName: string, expected: string): never {
+  throw new GovernorApiError(
+    `Governor response field "${pathName}" must be ${expected}.`,
+    200,
+    "INVALID_RESPONSE"
+  );
+}
+
+function apiRecord(
+  value: unknown,
+  pathName: string
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    invalidApiResponse(pathName, "an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function apiString(value: unknown, pathName: string): string {
+  if (typeof value !== "string") {
+    invalidApiResponse(pathName, "a string");
+  }
+  return value;
+}
+
+function apiNumber(value: unknown, pathName: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    invalidApiResponse(pathName, "a finite number");
+  }
+  return value;
+}
+
+function apiNullableString(value: unknown, pathName: string): string | null {
+  if (value === null) {
+    return null;
+  }
+  return apiString(value, pathName);
+}
+
+function parseJobView(value: unknown): JobView {
+  const record = apiRecord(value, "job");
+  const policy = apiRecord(record.policy, "job.policy");
+  const accounting = apiRecord(record.accounting, "job.accounting");
+  if (!Array.isArray(record.requests)) {
+    invalidApiResponse("job.requests", "an array");
+  }
+  const completionAccepted =
+    record.completion_accepted === null
+      ? null
+      : typeof record.completion_accepted === "boolean"
+        ? record.completion_accepted
+        : invalidApiResponse("job.completion_accepted", "a boolean or null");
+  return {
+    id: apiString(record.id, "job.id"),
+    status: apiString(record.status, "job.status"),
+    policy: {
+      budget_micro_usd: apiNumber(
+        policy.budget_micro_usd,
+        "job.policy.budget_micro_usd"
+      ),
+      budget_usd: apiString(policy.budget_usd, "job.policy.budget_usd"),
+      final_reserve_micro_usd: apiNumber(
+        policy.final_reserve_micro_usd,
+        "job.policy.final_reserve_micro_usd"
+      ),
+      final_reserve_usd: apiString(
+        policy.final_reserve_usd,
+        "job.policy.final_reserve_usd"
+      ),
+      max_responses: apiNumber(
+        policy.max_responses,
+        "job.policy.max_responses"
+      )
+    },
+    accounting: {
+      settled_micro_usd: apiNumber(
+        accounting.settled_micro_usd,
+        "job.accounting.settled_micro_usd"
+      ),
+      settled_usd: apiString(
+        accounting.settled_usd,
+        "job.accounting.settled_usd"
+      ),
+      reserved_micro_usd: apiNumber(
+        accounting.reserved_micro_usd,
+        "job.accounting.reserved_micro_usd"
+      ),
+      reserved_usd: apiString(
+        accounting.reserved_usd,
+        "job.accounting.reserved_usd"
+      ),
+      committed_micro_usd: apiNumber(
+        accounting.committed_micro_usd,
+        "job.accounting.committed_micro_usd"
+      ),
+      committed_usd: apiString(
+        accounting.committed_usd,
+        "job.accounting.committed_usd"
+      ),
+      uncommitted_micro_usd: apiNumber(
+        accounting.uncommitted_micro_usd,
+        "job.accounting.uncommitted_micro_usd"
+      ),
+      uncommitted_usd: apiString(
+        accounting.uncommitted_usd,
+        "job.accounting.uncommitted_usd"
+      ),
+      available_for_work_usd: apiString(
+        accounting.available_for_work_usd,
+        "job.accounting.available_for_work_usd"
+      ),
+      responses_started: apiNumber(
+        accounting.responses_started,
+        "job.accounting.responses_started"
+      )
+    },
+    pending_final_validation_request_id: apiNullableString(
+      record.pending_final_validation_request_id,
+      "job.pending_final_validation_request_id"
+    ),
+    completion_accepted: completionAccepted,
+    requests: record.requests.map((rawRequest, index) => {
+      const request = apiRecord(rawRequest, `job.requests[${index}]`);
+      const phase = request.phase;
+      if (phase !== "work" && phase !== "final") {
+        invalidApiResponse(
+          `job.requests[${index}].phase`,
+          '"work" or "final"'
+        );
+      }
+      return {
+        sequence: apiNumber(
+          request.sequence,
+          `job.requests[${index}].sequence`
+        ),
+        request_id: apiString(
+          request.request_id,
+          `job.requests[${index}].request_id`
+        ),
+        phase,
+        status: apiString(
+          request.status,
+          `job.requests[${index}].status`
+        ),
+        started_at: apiString(
+          request.started_at,
+          `job.requests[${index}].started_at`
+        )
+      };
+    })
+  };
+}
+
+function parseSubmission(value: unknown): ResponseSubmission {
+  const record = apiRecord(value, "submission");
+  const execution = apiRecord(record.execution, "submission.execution");
+  const parsed: SubmissionExecution = {
+    status: apiString(execution.status, "submission.execution.status")
+  };
+  if (execution.reason !== undefined) {
+    parsed.reason = apiString(
+      execution.reason,
+      "submission.execution.reason"
     );
   }
-  return body as T;
+  if (execution.response !== undefined && execution.response !== null) {
+    const response = apiRecord(
+      execution.response,
+      "submission.execution.response"
+    );
+    if (!Array.isArray(response.output)) {
+      invalidApiResponse(
+        "submission.execution.response.output",
+        "an array"
+      );
+    }
+    let usage: SubmissionResponse["usage"] = null;
+    if (response.usage !== undefined && response.usage !== null) {
+      const rawUsage = apiRecord(
+        response.usage,
+        "submission.execution.response.usage"
+      );
+      usage = {
+        input_tokens: apiNumber(
+          rawUsage.input_tokens,
+          "submission.execution.response.usage.input_tokens"
+        ),
+        output_tokens: apiNumber(
+          rawUsage.output_tokens,
+          "submission.execution.response.usage.output_tokens"
+        ),
+        total_tokens: apiNumber(
+          rawUsage.total_tokens,
+          "submission.execution.response.usage.total_tokens"
+        )
+      };
+    }
+    parsed.response = {
+      model: apiString(
+        response.model,
+        "submission.execution.response.model"
+      ),
+      status: apiString(
+        response.status,
+        "submission.execution.response.status"
+      ),
+      output: response.output,
+      usage
+    };
+  } else {
+    parsed.response = null;
+  }
+  if (execution.reservation !== undefined) {
+    const reservation = apiRecord(
+      execution.reservation,
+      "submission.execution.reservation"
+    );
+    parsed.reservation = {
+      exact_input_tokens: apiNumber(
+        reservation.exact_input_tokens,
+        "submission.execution.reservation.exact_input_tokens"
+      ),
+      max_output_tokens: apiNumber(
+        reservation.max_output_tokens,
+        "submission.execution.reservation.max_output_tokens"
+      ),
+      reserved_usd: apiString(
+        reservation.reserved_usd,
+        "submission.execution.reservation.reserved_usd"
+      ),
+      settled_usd: apiNullableString(
+        reservation.settled_usd,
+        "submission.execution.reservation.settled_usd"
+      )
+    };
+  }
+  return {
+    execution: parsed,
+    job: parseJobView(record.job)
+  };
 }
 
 function riskBand(job: JobView): RiskBand {
@@ -271,20 +509,18 @@ function promptResultMarkdown(
   } else {
     lines.push(
       "No provider response is available for this outcome. Check the " +
-        "TokenGovernor output channel and the job panel."
+        "Governor output channel and the job panel."
     );
   }
   return `${lines.join("\n")}\n`;
 }
 
 function nonce(): string {
-  let text = "";
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 32; i += 1) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
+  return randomBytes(24).toString("base64");
+}
+
+function isPanelAction(value: unknown): value is PanelAction {
+  return typeof value === "string" && PANEL_ACTIONS.has(value as PanelAction);
 }
 
 const VIEW_STYLES = `
@@ -497,18 +733,18 @@ function jobSectionHtml(job: JobView): string {
   <p class="sub">status: ${escapeHtml(job.status)} · responses ${job.accounting.responses_started}/${job.policy.max_responses}</p>
   <span class="band" style="border-color:${bandColor};color:${bandColor}">${band.replace("_", " ")}</span>
 
-  <p class="hero">${usd(job.accounting.committed_usd)} <small>of ${usd(job.policy.budget_usd)} committed</small></p>
+  <p class="hero">${escapeHtml(usd(job.accounting.committed_usd))} <small>of ${escapeHtml(usd(job.policy.budget_usd))} committed</small></p>
   <div class="bar" title="settled + reserved against the budget">
     <span class="settled" style="width:${pct(job.accounting.settled_micro_usd)}"></span>
     <span class="reserved" style="width:${pct(job.accounting.reserved_micro_usd)}"></span>
   </div>
 
   <dl>
-    <dt>Settled</dt><dd>${usd(job.accounting.settled_usd)}</dd>
-    <dt>Reserved</dt><dd>${usd(job.accounting.reserved_usd)}</dd>
-    <dt>Uncommitted</dt><dd>${usd(job.accounting.uncommitted_usd)}</dd>
-    <dt>Available for work</dt><dd>${usd(job.accounting.available_for_work_usd)}</dd>
-    <dt>Protected final reserve</dt><dd>${usd(job.policy.final_reserve_usd)}</dd>
+    <dt>Settled</dt><dd>${escapeHtml(usd(job.accounting.settled_usd))}</dd>
+    <dt>Reserved</dt><dd>${escapeHtml(usd(job.accounting.reserved_usd))}</dd>
+    <dt>Uncommitted</dt><dd>${escapeHtml(usd(job.accounting.uncommitted_usd))}</dd>
+    <dt>Available for work</dt><dd>${escapeHtml(usd(job.accounting.available_for_work_usd))}</dd>
+    <dt>Protected final reserve</dt><dd>${escapeHtml(usd(job.policy.final_reserve_usd))}</dd>
     <dt>Pending validation</dt><dd>${escapeHtml(job.pending_final_validation_request_id ?? "none")}</dd>
   </dl>
 
@@ -605,7 +841,7 @@ class GovernorViewProvider implements vscode.WebviewViewProvider {
       const msg = message as { type?: string; action?: PanelAction };
       if (msg?.type === "ready") {
         this.onReady?.();
-      } else if (msg?.type === "action" && msg.action) {
+      } else if (msg?.type === "action" && isPanelAction(msg.action)) {
         this.onAction?.(msg.action);
       }
     });
@@ -625,14 +861,22 @@ class GovernorViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
-export function activate(context: vscode.ExtensionContext): void {
-  const output = vscode.window.createOutputChannel("TokenGovernor");
+export async function activate(
+  context: vscode.ExtensionContext
+): Promise<void> {
+  const output = vscode.window.createOutputChannel("Governor");
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     50
   );
   statusBar.command = "tokenGovernor.openJobPanel";
   context.subscriptions.push(output, statusBar);
+
+  const localServer = new LocalGovernorServer({
+    serverPath: path.join(context.extensionPath, "out", "governor-server.mjs"),
+    log: (line) => output.appendLine(line)
+  });
+  context.subscriptions.push(localServer);
 
   const panel = new GovernorViewProvider();
   context.subscriptions.push(
@@ -642,7 +886,10 @@ export function activate(context: vscode.ExtensionContext): void {
       { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
-  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let pollingDisposed = false;
+  let refreshInFlight: Promise<void> | undefined;
+  let refreshQueued = false;
 
   const activeJobId = (): string | undefined =>
     context.workspaceState.get<string>(ACTIVE_JOB_KEY);
@@ -655,12 +902,46 @@ export function activate(context: vscode.ExtensionContext): void {
     await context.workspaceState.update(ACTIVE_JOB_KEY, jobId);
   };
 
+  const forgetJob = async (jobId: string): Promise<void> => {
+    const known = context.workspaceState.get<string[]>(KNOWN_JOBS_KEY, []);
+    await context.workspaceState.update(
+      KNOWN_JOBS_KEY,
+      known.filter((knownId) => knownId !== jobId)
+    );
+    if (activeJobId() === jobId) {
+      await context.workspaceState.update(ACTIVE_JOB_KEY, undefined);
+    }
+  };
+
+  const localServerOptions = async (): Promise<{
+    readonly baseUrl: string;
+    readonly enabled: boolean;
+    readonly apiKey?: string;
+  }> => {
+    const config = vscode.workspace.getConfiguration("tokenGovernor");
+    const apiKey = await context.secrets.get(OPENAI_API_KEY_SECRET);
+    return {
+      baseUrl: apiBaseUrl(),
+      enabled: config.get<boolean>("autoStartLocalServer", true),
+      ...(apiKey ? { apiKey } : {})
+    };
+  };
+
+  const configureLocalServer = async (
+    restart = false
+  ): Promise<LocalServerStatus> => {
+    const options = await localServerOptions();
+    return restart
+      ? localServer.restart(options)
+      : localServer.ensureRunning(options);
+  };
+
   const updateStatusBar = (job: JobView): void => {
     const band = riskBand(job);
     statusBar.text = `$(shield) ${usd(job.accounting.committed_usd)} / ${usd(job.policy.budget_usd)} ${band.replace("_", " ")}`;
     statusBar.tooltip = new vscode.MarkdownString(
       [
-        `**TokenGovernor job \`${job.id}\`** — ${job.status}`,
+        `**Governor job \`${job.id}\`** — ${job.status}`,
         "",
         `- Settled: ${usd(job.accounting.settled_usd)}`,
         `- Reserved: ${usd(job.accounting.reserved_usd)}`,
@@ -679,24 +960,33 @@ export function activate(context: vscode.ExtensionContext): void {
     statusBar.show();
   };
 
-  const refresh = async (): Promise<void> => {
+  const refreshOnce = async (): Promise<void> => {
     const jobId = activeJobId();
-    const api = apiBaseUrl();
-    if (!jobId) {
-      statusBar.hide();
-      panel.post({
-        api,
-        connected: true,
-        statusHtml: "",
-        jobHtml: emptyJobHtml(
-          "No active governed job. Click “Create Job”, or just “Run CI-Repair”."
-        )
-      });
-      return;
-    }
+    let api = vscode.workspace
+      .getConfiguration("tokenGovernor")
+      .get<string>("apiBaseUrl", "http://127.0.0.1:8787");
     try {
-      const job = await apiRequest<JobView>(
-        `/v1/jobs/${encodeURIComponent(jobId)}`
+      api = apiBaseUrl();
+      if (!jobId) {
+        const client = new RepairClient({
+          baseUrl: api,
+          timeoutMs: Math.min(requestTimeoutMs(), 5_000)
+        });
+        await client.health();
+        statusBar.hide();
+        panel.post({
+          api,
+          connected: true,
+          statusHtml: "",
+          jobHtml: emptyJobHtml(
+            "No active governed job. Click “Create Job”, or just “Run CI-Repair”."
+          )
+        });
+        return;
+      }
+
+      const job = parseJobView(
+        await apiRequest(`/v1/jobs/${encodeURIComponent(jobId)}`)
       );
       updateStatusBar(job);
       panel.post({
@@ -706,9 +996,49 @@ export function activate(context: vscode.ExtensionContext): void {
         jobHtml: jobSectionHtml(job)
       });
     } catch (error) {
+      if (
+        jobId &&
+        error instanceof GovernorApiError &&
+        error.code === "JOB_NOT_FOUND"
+      ) {
+        await forgetJob(jobId);
+        statusBar.hide();
+        panel.post({
+          api,
+          connected: true,
+          statusHtml:
+            '<div class="banner info">The previous job expired when the local service restarted.</div>',
+          jobHtml: emptyJobHtml("Create a job to start a new governed session.")
+        });
+        return;
+      }
+      if (
+        error instanceof GovernorApiError &&
+        (error.code === "NETWORK_ERROR" || error.code === "TIMEOUT")
+      ) {
+        try {
+          const status = await configureLocalServer();
+          if (status === "managed") {
+            refreshQueued = true;
+            return;
+          }
+        } catch (recoveryError) {
+          output.appendLine(
+            `local server recovery failed: ${
+              recoveryError instanceof Error
+                ? recoveryError.message
+                : String(recoveryError)
+            }`
+          );
+        }
+      }
       const message =
         error instanceof Error ? error.message : "Governor request failed.";
-      statusBar.text = "$(shield) Governor: unreachable";
+      const connected =
+        error instanceof GovernorApiError ? error.status > 0 : false;
+      statusBar.text = connected
+        ? "$(shield) Governor: request failed"
+        : "$(shield) Governor: unreachable";
       statusBar.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.errorBackground"
       );
@@ -716,18 +1046,36 @@ export function activate(context: vscode.ExtensionContext): void {
       statusBar.show();
       panel.post({
         api,
-        connected: false,
+        connected,
         statusHtml: `<div class="banner bad">${escapeHtml(message)}</div>`,
         jobHtml: ""
       });
     }
   };
 
+  const refresh = (): Promise<void> => {
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return refreshInFlight;
+    }
+    const operation = (async () => {
+      do {
+        refreshQueued = false;
+        await refreshOnce();
+      } while (refreshQueued);
+    })().finally(() => {
+      if (refreshInFlight === operation) {
+        refreshInFlight = undefined;
+      }
+    });
+    refreshInFlight = operation;
+    return operation;
+  };
+
   const doRepair = async (): Promise<void> => {
     const config = vscode.workspace.getConfiguration("tokenGovernor");
     const fixtureId = config.get<string>("defaultFixtureId", "broken-sum");
     const mode = config.get<"fake" | "hybrid" | "live">("providerMode", "fake");
-    const client = new RepairClient({ baseUrl: apiBaseUrl() });
 
     panel.reveal();
     panel.post({
@@ -736,6 +1084,21 @@ export function activate(context: vscode.ExtensionContext): void {
     });
 
     try {
+      await configureLocalServer();
+      const client = new RepairClient({
+        baseUrl: apiBaseUrl(),
+        timeoutMs: requestTimeoutMs()
+      });
+      if (mode !== "fake") {
+        const health = await client.health();
+        if (!health.providerConfigured) {
+          throw new GovernorApiError(
+            `OpenAI API access is required for ${mode} mode. Run “Governor: Set OpenAI API Key” first.`,
+            503,
+            "PROVIDER_NOT_CONFIGURED"
+          );
+        }
+      }
       const run = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
@@ -744,8 +1107,17 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         async (_progress, token) => {
           const controller = new AbortController();
-          token.onCancellationRequested(() => controller.abort());
-          return client.runRepair({ fixtureId, mode }, controller.signal);
+          const cancellation = token.onCancellationRequested(() =>
+            controller.abort()
+          );
+          try {
+            return await client.runRepair(
+              { fixtureId, mode },
+              controller.signal
+            );
+          } finally {
+            cancellation.dispose();
+          }
         }
       );
 
@@ -762,9 +1134,20 @@ export function activate(context: vscode.ExtensionContext): void {
         `Governed CI-repair: ${repaired ? "Repaired ✓" : "Not repaired"} · spend ${spend}.`
       );
     } catch (error) {
+      if (
+        error instanceof GovernorApiError &&
+        error.code === "CANCELLED"
+      ) {
+        output.appendLine("repair cancelled");
+        panel.post({
+          busy: false,
+          statusHtml: '<div class="banner info">CI-repair cancelled.</div>'
+        });
+        return;
+      }
       const detail =
-        error instanceof RepairApiError
-          ? `[${error.code ?? `HTTP_${error.status}`}] ${error.message}`
+        error instanceof GovernorApiError
+          ? `[${error.code}] ${error.message}`
           : error instanceof Error
             ? error.message
             : "Governed CI-repair failed.";
@@ -777,17 +1160,33 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
-  const restartPolling = (): void => {
+  const schedulePolling = (): void => {
     if (pollTimer) {
-      clearInterval(pollTimer);
+      clearTimeout(pollTimer);
     }
-    pollTimer = setInterval(() => void refresh(), pollIntervalMs());
-    context.subscriptions.push({
-      dispose: () => pollTimer && clearInterval(pollTimer)
-    });
+    if (pollingDisposed) {
+      return;
+    }
+    pollTimer = setTimeout(() => {
+      void refresh()
+        .catch((error) => {
+          output.appendLine(
+            `polling refresh failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        })
+        .finally(schedulePolling);
+    }, pollIntervalMs());
   };
-  restartPolling();
-  void refresh();
+  context.subscriptions.push({
+    dispose: () => {
+      pollingDisposed = true;
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+      }
+    }
+  });
 
   panel.onReady = () => void refresh();
   panel.onAction = (action) => {
@@ -802,8 +1201,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("tokenGovernor")) {
-        restartPolling();
+      if (event.affectsConfiguration("tokenGovernor.pollIntervalMs")) {
+        schedulePolling();
+      }
+      if (
+        event.affectsConfiguration("tokenGovernor.apiBaseUrl") ||
+        event.affectsConfiguration("tokenGovernor.autoStartLocalServer")
+      ) {
+        void configureLocalServer(true)
+          .catch((error) => {
+            output.appendLine(
+              `local server configuration failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          })
+          .finally(() => refresh());
+      } else if (event.affectsConfiguration("tokenGovernor")) {
         void refresh();
       }
     })
@@ -812,12 +1226,14 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("tokenGovernor.healthCheck", async () => {
       try {
-        const health = await apiRequest<Record<string, unknown>>(
-          "/api/health"
-        );
+        await configureLocalServer();
+        const health = await new RepairClient({
+          baseUrl: apiBaseUrl(),
+          timeoutMs: Math.min(requestTimeoutMs(), 5_000)
+        }).health();
         output.appendLine(`health: ${JSON.stringify(health)}`);
         void vscode.window.showInformationMessage(
-          `Governor is up at ${apiBaseUrl()}.`
+          `Governor is ready at ${apiBaseUrl()}${health.providerConfigured ? " with OpenAI access" : ""}.`
         );
       } catch (error) {
         void vscode.window.showErrorMessage(
@@ -842,10 +1258,13 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       try {
-        const job = await apiRequest<JobView>("/v1/jobs", {
-          method: "POST",
-          body: JSON.stringify({ budget_usd: budget.trim() })
-        });
+        await configureLocalServer();
+        const job = parseJobView(
+          await apiRequest("/v1/jobs", {
+            method: "POST",
+            body: JSON.stringify({ budget_usd: budget.trim() })
+          })
+        );
         await rememberJob(job.id);
         output.appendLine(`created job: ${JSON.stringify(job, null, 2)}`);
         void refresh();
@@ -926,11 +1345,36 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         const requestId = `${phase}:${Date.now()}`;
         try {
-          const result = await apiRequest<Record<string, unknown>>(
-            `/v1/jobs/${encodeURIComponent(jobId)}/responses`,
+          await configureLocalServer();
+          const result = await vscode.window.withProgress(
             {
-              method: "POST",
-              body: JSON.stringify({ request_id: requestId, phase, input })
+              location: vscode.ProgressLocation.Notification,
+              title: `Governor: dispatching ${requestId}...`,
+              cancellable: true
+            },
+            async (_progress, token) => {
+              const controller = new AbortController();
+              const cancellation = token.onCancellationRequested(() =>
+                controller.abort()
+              );
+              try {
+                return parseSubmission(
+                  await apiRequest(
+                    `/v1/jobs/${encodeURIComponent(jobId)}/responses`,
+                    {
+                      method: "POST",
+                      body: JSON.stringify({
+                        request_id: requestId,
+                        phase,
+                        input
+                      })
+                    },
+                    controller.signal
+                  )
+                );
+              } finally {
+                cancellation.dispose();
+              }
             }
           );
           output.appendLine(
@@ -938,17 +1382,26 @@ export function activate(context: vscode.ExtensionContext): void {
           );
           void refresh();
           void vscode.window.showInformationMessage(
-            `Governor admitted ${requestId}. Details in the TokenGovernor output channel.`
+            `Governor admitted ${requestId}. Details are in the Governor output channel.`
           );
         } catch (error) {
           void refresh();
           if (error instanceof GovernorApiError) {
+            if (error.code === "CANCELLED") {
+              void vscode.window.showInformationMessage(
+                `Governor cancelled ${requestId}.`
+              );
+              return;
+            }
             output.appendLine(
               `response ${requestId} refused: [${error.code}] ${error.message}`
             );
-            void vscode.window.showWarningMessage(
-              `Governor refused ${requestId} (${error.code}): ${error.message}`
-            );
+            const message = `Governor ${error.status > 0 ? "refused" : "could not submit"} ${requestId} (${error.code}): ${error.message}`;
+            if (error.status > 0) {
+              void vscode.window.showWarningMessage(message);
+            } else {
+              void vscode.window.showErrorMessage(message);
+            }
             return;
           }
           void vscode.window.showErrorMessage(
@@ -994,20 +1447,37 @@ export function activate(context: vscode.ExtensionContext): void {
       const requestId = `${phase}:${Date.now()}`;
       const jobPath = encodeURIComponent(jobId);
       try {
+        await configureLocalServer();
         const submission = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: `Governor: dispatching ${requestId}...`
+            title: `Governor: dispatching ${requestId}...`,
+            cancellable: true
           },
-          () =>
-            apiRequest<ResponseSubmission>(`/v1/jobs/${jobPath}/responses`, {
-              method: "POST",
-              body: JSON.stringify({
-                request_id: requestId,
-                phase,
-                input: prompt
-              })
-            })
+          async (_progress, token) => {
+            const controller = new AbortController();
+            const cancellation = token.onCancellationRequested(() =>
+              controller.abort()
+            );
+            try {
+              return parseSubmission(
+                await apiRequest(
+                  `/v1/jobs/${jobPath}/responses`,
+                  {
+                    method: "POST",
+                    body: JSON.stringify({
+                      request_id: requestId,
+                      phase,
+                      input: prompt
+                    })
+                  },
+                  controller.signal
+                )
+              );
+            } finally {
+              cancellation.dispose();
+            }
+          }
         );
         output.appendLine(
           `prompt ${requestId}: ${JSON.stringify(submission, null, 2)}`
@@ -1030,12 +1500,21 @@ export function activate(context: vscode.ExtensionContext): void {
       } catch (error) {
         void refresh();
         if (error instanceof GovernorApiError) {
+          if (error.code === "CANCELLED") {
+            void vscode.window.showInformationMessage(
+              `Governor cancelled ${requestId}.`
+            );
+            return;
+          }
           output.appendLine(
             `prompt ${requestId} refused: [${error.code}] ${error.message}`
           );
-          void vscode.window.showWarningMessage(
-            `Governor refused ${requestId} (${error.code}): ${error.message}`
-          );
+          const message = `Governor ${error.status > 0 ? "refused" : "could not submit"} ${requestId} (${error.code}): ${error.message}`;
+          if (error.status > 0) {
+            void vscode.window.showWarningMessage(message);
+          } else {
+            void vscode.window.showErrorMessage(message);
+          }
           return;
         }
         void vscode.window.showErrorMessage(
@@ -1054,8 +1533,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       let job: JobView;
       try {
-        job = await apiRequest<JobView>(
-          `/v1/jobs/${encodeURIComponent(jobId)}`
+        await configureLocalServer();
+        job = parseJobView(
+          await apiRequest(`/v1/jobs/${encodeURIComponent(jobId)}`)
         );
       } catch (error) {
         void vscode.window.showErrorMessage(
@@ -1078,15 +1558,17 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       try {
-        const result = await apiRequest<Record<string, unknown>>(
-          `/v1/jobs/${encodeURIComponent(jobId)}/finalize`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              request_id: pending,
-              accepted: decision.startsWith("Accept")
-            })
-          }
+        const result = parseJobView(
+          await apiRequest(
+            `/v1/jobs/${encodeURIComponent(jobId)}/finalize`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                request_id: pending,
+                accepted: decision.startsWith("Accept")
+              })
+            }
+          )
         );
         output.appendLine(`finalize: ${JSON.stringify(result, null, 2)}`);
         void refresh();
@@ -1102,8 +1584,85 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "tokenGovernor.setOpenAiApiKey",
+      async () => {
+        const apiKey = await vscode.window.showInputBox({
+          title: "Governor: OpenAI API key",
+          prompt:
+            "Stored in VS Code Secret Storage and used only by the managed local Governor service.",
+          password: true,
+          ignoreFocusOut: true,
+          validateInput: (value) =>
+            value.trim() === "" ? "Enter a non-empty API key." : undefined
+        });
+        if (apiKey === undefined) {
+          return;
+        }
+        await context.secrets.store(OPENAI_API_KEY_SECRET, apiKey.trim());
+        try {
+          const status = await configureLocalServer(true);
+          output.appendLine(`OpenAI API key updated; server status: ${status}`);
+          await refresh();
+          const detail =
+            status === "managed"
+              ? " The managed local service was restarted."
+              : status === "external"
+                ? " The configured service is externally managed and was not restarted."
+                : " Local service auto-start is disabled for the configured URL.";
+          void vscode.window.showInformationMessage(
+            `Governor stored the OpenAI API key securely.${detail}`
+          );
+        } catch (error) {
+          void vscode.window.showErrorMessage(
+            `Governor stored the key, but could not restart the local service: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "tokenGovernor.clearOpenAiApiKey",
+      async () => {
+        await context.secrets.delete(OPENAI_API_KEY_SECRET);
+        try {
+          const status = await configureLocalServer(true);
+          output.appendLine(`OpenAI API key cleared; server status: ${status}`);
+          await refresh();
+          void vscode.window.showInformationMessage(
+            "Governor cleared the OpenAI API key from Secret Storage."
+          );
+        } catch (error) {
+          void vscode.window.showErrorMessage(
+            `Governor cleared the key, but could not restart the local service: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+      }
+    )
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand("tokenGovernor.runRepair", () => doRepair())
   );
+
+  try {
+    const status = await configureLocalServer();
+    output.appendLine(`local server status: ${status}`);
+  } catch (error) {
+    output.appendLine(
+      `local server startup failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+  schedulePolling();
+  await refresh();
 }
 
 function appendRepairSummary(

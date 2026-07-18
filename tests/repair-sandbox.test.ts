@@ -28,6 +28,12 @@ describe("repair sandbox (broken-sum)", () => {
       expect(failing.durationMs).toBeGreaterThanOrEqual(0);
       expect(sandbox.editedPaths()).toEqual([]);
 
+      const cancelled = new AbortController();
+      cancelled.abort(new Error("test cancellation"));
+      await expect(sandbox.runTests(cancelled.signal)).rejects.toThrow(
+        "test cancellation"
+      );
+
       // Reading a non-allowlisted path throws.
       expect(() => sandbox.readFile("test/calculator.test.mjs")).toThrow();
 

@@ -2,6 +2,13 @@
 // module free of `import "vscode"` makes it unit-testable under plain Node
 // (see repairClient.spec.ts) and reusable outside the extension host.
 
+import {
+  GovernorApiError,
+  GovernorHttpClient
+} from "./apiClient";
+
+export { GovernorApiError } from "./apiClient";
+
 export type RepairMode = "fake" | "hybrid" | "live";
 
 export type RepairTraceEvent = {
@@ -28,13 +35,13 @@ export type RepairResult = {
   evaluation: RepairEvaluation | null;
   toolCalls: number;
   revision: string;
-  settledMicroUsd?: number;
+  settledMicroUsd: number;
   trace: RepairTraceEvent[];
 };
 
 export type RepairRunResponse = {
   fixtureId: string;
-  mode: string;
+  mode: RepairMode;
   model: string;
   rateCardVersion: string;
   policy: unknown;
@@ -58,20 +65,6 @@ const DEFAULT_FIXTURE_ID = "broken-sum";
 const DEFAULT_MODE: RepairMode = "fake";
 const DEFAULT_TIMEOUT_MS = 120_000;
 
-// Mirrors the server's `{ error: { code, message } }` envelope. Defined locally
-// (rather than imported) so this module stays dependency-free and vscode-free.
-export class GovernorApiError extends Error {
-  readonly status: number;
-  readonly code?: string;
-
-  constructor(message: string, status: number, code?: string) {
-    super(message);
-    this.name = "GovernorApiError";
-    this.status = status;
-    this.code = code;
-  }
-}
-
 /**
  * Formats an integer micro-USD amount as a dollar string with six fractional
  * digits, e.g. 1234 → "$0.001234". Returns "n/a" for undefined/invalid input.
@@ -85,112 +78,225 @@ export function formatMicroUsd(microUsd: number | undefined): string {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function asString(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value : fallback;
+function invalidResponse(message: string): never {
+  throw new GovernorApiError(message, 200, "INVALID_RESPONSE");
 }
 
-function asNumber(value: unknown, fallback = 0): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function asBoolean(value: unknown, fallback = false): boolean {
-  return typeof value === "boolean" ? value : fallback;
-}
-
-function normalizeTrace(value: unknown): RepairTraceEvent[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value
-    .filter(isRecord)
-    .map((event, index) => {
-      const normalized: RepairTraceEvent = {
-        kind: asString(event.kind, "event"),
-        sequence: asNumber(event.sequence, index)
-      };
-      if (typeof event.name === "string") normalized.name = event.name;
-      if (typeof event.phase === "string") normalized.phase = event.phase;
-      if (typeof event.status === "string") normalized.status = event.status;
-      if (typeof event.state === "string") normalized.state = event.state;
-      return normalized;
-    });
-}
-
-function normalizeEvaluation(value: unknown): RepairEvaluation | null {
+function requireRecord(
+  value: unknown,
+  path: string
+): Record<string, unknown> {
   if (!isRecord(value)) {
+    invalidResponse(`Governor response field "${path}" must be an object.`);
+  }
+  return value;
+}
+
+function requireString(value: unknown, path: string): string {
+  if (typeof value !== "string") {
+    invalidResponse(`Governor response field "${path}" must be a string.`);
+  }
+  return value;
+}
+
+function requireNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    invalidResponse(`Governor response field "${path}" must be a number.`);
+  }
+  return value;
+}
+
+function requireInteger(value: unknown, path: string): number {
+  const number = requireNumber(value, path);
+  if (!Number.isSafeInteger(number)) {
+    invalidResponse(`Governor response field "${path}" must be an integer.`);
+  }
+  return number;
+}
+
+function requireNonNegativeInteger(value: unknown, path: string): number {
+  const number = requireInteger(value, path);
+  if (number < 0) {
+    invalidResponse(
+      `Governor response field "${path}" must be a non-negative integer.`
+    );
+  }
+  return number;
+}
+
+function requireBoolean(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") {
+    invalidResponse(`Governor response field "${path}" must be a boolean.`);
+  }
+  return value;
+}
+
+function optionalString(
+  value: unknown,
+  path: string
+): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return requireString(value, path);
+}
+
+function requireRepairMode(value: unknown, path: string): RepairMode {
+  if (value !== "fake" && value !== "hybrid" && value !== "live") {
+    invalidResponse(
+      `Governor response field "${path}" must be "fake", "hybrid", or "live".`
+    );
+  }
+  return value;
+}
+
+function parseTrace(value: unknown): RepairTraceEvent[] {
+  if (!Array.isArray(value)) {
+    invalidResponse('Governor response field "result.trace" must be an array.');
+  }
+  return value.map((rawEvent, index) => {
+    const event = requireRecord(rawEvent, `result.trace[${index}]`);
+    const normalized: RepairTraceEvent = {
+      kind: requireString(event.kind, `result.trace[${index}].kind`),
+      sequence: requireNonNegativeInteger(
+        event.sequence,
+        `result.trace[${index}].sequence`
+      )
+    };
+    const name = optionalString(event.name, `result.trace[${index}].name`);
+    const phase = optionalString(event.phase, `result.trace[${index}].phase`);
+    const status = optionalString(
+      event.status,
+      `result.trace[${index}].status`
+    );
+    const state = optionalString(event.state, `result.trace[${index}].state`);
+    if (name !== undefined) normalized.name = name;
+    if (phase !== undefined) normalized.phase = phase;
+    if (status !== undefined) normalized.status = status;
+    if (state !== undefined) normalized.state = state;
+    return normalized;
+  });
+}
+
+function parseEvaluation(value: unknown): RepairEvaluation | null {
+  if (value === null) {
     return null;
   }
-  const violations = Array.isArray(value.violations)
-    ? value.violations.filter((v): v is string => typeof v === "string")
-    : [];
+  const evaluation = requireRecord(value, "result.evaluation");
+  if (!Array.isArray(evaluation.violations)) {
+    invalidResponse(
+      'Governor response field "result.evaluation.violations" must be an array.'
+    );
+  }
+  if (
+    !evaluation.violations.every(
+      (violation): violation is string => typeof violation === "string"
+    )
+  ) {
+    invalidResponse(
+      'Governor response field "result.evaluation.violations" must contain strings.'
+    );
+  }
+  const violations = [...evaluation.violations];
   return {
-    passed: asBoolean(value.passed),
-    targetPassed: asBoolean(value.targetPassed),
-    policyRespected: asBoolean(value.policyRespected),
-    exitCode: asNumber(value.exitCode),
+    passed: requireBoolean(evaluation.passed, "result.evaluation.passed"),
+    targetPassed: requireBoolean(
+      evaluation.targetPassed,
+      "result.evaluation.targetPassed"
+    ),
+    policyRespected: requireBoolean(
+      evaluation.policyRespected,
+      "result.evaluation.policyRespected"
+    ),
+    exitCode: requireInteger(
+      evaluation.exitCode,
+      "result.evaluation.exitCode"
+    ),
     violations
   };
 }
 
-function normalizeResult(value: unknown): RepairResult {
-  const record = isRecord(value) ? value : {};
-  const status: RepairResult["status"] =
-    record.status === "repaired" ? "repaired" : "not_repaired";
-  const result: RepairResult = {
-    status,
-    finalText: typeof record.finalText === "string" ? record.finalText : null,
-    evaluation: normalizeEvaluation(record.evaluation),
-    toolCalls: asNumber(record.toolCalls),
-    revision: asString(record.revision),
-    trace: normalizeTrace(record.trace)
-  };
-  if (typeof record.reason === "string") {
-    result.reason = record.reason;
+function parseResult(value: unknown): RepairResult {
+  const record = requireRecord(value, "result");
+  if (record.status !== "repaired" && record.status !== "not_repaired") {
+    invalidResponse(
+      'Governor response field "result.status" must be "repaired" or "not_repaired".'
+    );
   }
-  if (typeof record.settledMicroUsd === "number" && Number.isFinite(record.settledMicroUsd)) {
-    result.settledMicroUsd = record.settledMicroUsd;
+  if (record.finalText !== null && typeof record.finalText !== "string") {
+    invalidResponse(
+      'Governor response field "result.finalText" must be a string or null.'
+    );
+  }
+  const settledMicroUsd = requireNonNegativeInteger(
+    record.settledMicroUsd,
+    "result.settledMicroUsd"
+  );
+  const result: RepairResult = {
+    status: record.status,
+    finalText: record.finalText,
+    evaluation: parseEvaluation(record.evaluation),
+    toolCalls: requireNonNegativeInteger(record.toolCalls, "result.toolCalls"),
+    revision: requireString(record.revision, "result.revision"),
+    settledMicroUsd,
+    trace: parseTrace(record.trace)
+  };
+  const reason = optionalString(record.reason, "result.reason");
+  if (reason !== undefined) result.reason = reason;
+  if (result.status === "repaired") {
+    if (result.finalText === null || result.evaluation === null) {
+      invalidResponse(
+        "A repaired Governor result must include final text and an evaluation."
+      );
+    }
+  } else if (!result.reason) {
+    invalidResponse("A non-repaired Governor result must include a reason.");
   }
   return result;
 }
 
-function normalizeRunResponse(value: unknown): RepairRunResponse {
-  const record = isRecord(value) ? value : {};
+function parseRunResponse(value: unknown): RepairRunResponse {
+  const record = requireRecord(value, "response");
+  requireRecord(record.policy, "policy");
   return {
-    fixtureId: asString(record.fixtureId, DEFAULT_FIXTURE_ID),
-    mode: asString(record.mode, DEFAULT_MODE),
-    model: asString(record.model),
-    rateCardVersion: asString(record.rateCardVersion),
+    fixtureId: requireString(record.fixtureId, "fixtureId"),
+    mode: requireRepairMode(record.mode, "mode"),
+    model: requireString(record.model, "model"),
+    rateCardVersion: requireString(record.rateCardVersion, "rateCardVersion"),
     policy: record.policy,
-    result: normalizeResult(record.result)
+    result: parseResult(record.result)
   };
 }
 
-function normalizeHealth(value: unknown): RepairHealth {
-  const record = isRecord(value) ? value : {};
+function parseHealth(value: unknown): RepairHealth {
+  const record = requireRecord(value, "response");
   const health: RepairHealth = {
-    service: asString(record.service),
-    status: asString(record.status),
-    mode: asString(record.mode),
-    providerConfigured: asBoolean(record.providerConfigured)
+    service: requireString(record.service, "service"),
+    status: requireString(record.status, "status"),
+    mode: requireString(record.mode, "mode"),
+    providerConfigured: requireBoolean(
+      record.providerConfigured,
+      "providerConfigured"
+    )
   };
-  if (typeof record.governedApi === "boolean") {
-    health.governedApi = record.governedApi;
+  if (record.governedApi !== undefined) {
+    health.governedApi = requireBoolean(record.governedApi, "governedApi");
   }
   return health;
 }
 
 export class RepairClient {
-  readonly #baseUrl: string;
-  readonly #fetch: typeof fetch;
-  readonly #timeoutMs: number;
+  readonly #http: GovernorHttpClient;
 
   constructor(opts: { baseUrl: string; fetchImpl?: typeof fetch; timeoutMs?: number }) {
-    this.#baseUrl = opts.baseUrl.replace(/\/+$/, "");
-    this.#fetch = opts.fetchImpl ?? globalThis.fetch;
-    this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#http = new GovernorHttpClient({
+      baseUrl: opts.baseUrl,
+      ...(opts.fetchImpl === undefined ? {} : { fetchImpl: opts.fetchImpl }),
+      timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    });
   }
 
   async runRepair(
@@ -201,7 +307,7 @@ export class RepairClient {
       fixtureId: input?.fixtureId ?? DEFAULT_FIXTURE_ID,
       mode: input?.mode ?? DEFAULT_MODE
     };
-    const payload = await this.#request(
+    const payload = await this.#http.request(
       "/api/repair/runs",
       {
         method: "POST",
@@ -209,59 +315,15 @@ export class RepairClient {
       },
       signal
     );
-    return normalizeRunResponse(payload);
+    return parseRunResponse(payload);
   }
 
   async health(signal?: AbortSignal): Promise<RepairHealth> {
-    const payload = await this.#request("/api/health", { method: "GET" }, signal);
-    return normalizeHealth(payload);
-  }
-
-  async #request(
-    path: string,
-    init: RequestInit,
-    signal?: AbortSignal
-  ): Promise<unknown> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
-    if (signal) {
-      if (signal.aborted) {
-        controller.abort();
-      } else {
-        signal.addEventListener("abort", () => controller.abort(), { once: true });
-      }
-    }
-
-    let response: Response;
-    try {
-      response = await this.#fetch(`${this.#baseUrl}${path}`, {
-        ...init,
-        signal: controller.signal,
-        headers: {
-          Accept: "application/json",
-          ...(init.body ? { "Content-Type": "application/json" } : {}),
-          ...init.headers
-        }
-      });
-    } catch (error) {
-      throw new GovernorApiError(
-        `Could not reach the governor at ${this.#baseUrl}. Is the server running?`,
-        0,
-        "NETWORK_ERROR"
-      );
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    const raw = (await response.json().catch(() => ({}))) as unknown;
-    if (!response.ok) {
-      const envelope = isRecord(raw) ? raw.error : undefined;
-      const code = isRecord(envelope) ? asString(envelope.code) || undefined : undefined;
-      const message = isRecord(envelope)
-        ? asString(envelope.message) || `Request failed with HTTP ${response.status}.`
-        : `Request failed with HTTP ${response.status}.`;
-      throw new GovernorApiError(message, response.status, code);
-    }
-    return raw;
+    const payload = await this.#http.request(
+      "/api/health",
+      { method: "GET" },
+      signal
+    );
+    return parseHealth(payload);
   }
 }

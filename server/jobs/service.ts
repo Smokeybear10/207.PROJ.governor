@@ -597,7 +597,8 @@ export class GovernedJobService {
 
   async createResponse(
     id: string,
-    value: unknown
+    value: unknown,
+    signal?: AbortSignal
   ): Promise<GovernedResponseServiceResult> {
     const record = this.#requireJob(id);
     const input = parseBody(
@@ -705,7 +706,8 @@ export class GovernedJobService {
       attempt,
       intent.context,
       maxOutputTokens,
-      minimumOutputTokens
+      minimumOutputTokens,
+      signal
     ).then((outcome) => {
       attempt.outcome = outcome;
       attempt.promise = undefined;
@@ -745,7 +747,8 @@ export class GovernedJobService {
     attempt: ResponseAttempt,
     context: ResponseContext,
     maxOutputTokens: number,
-    minimumOutputTokens: number
+    minimumOutputTokens: number,
+    signal?: AbortSignal
   ): Promise<AttemptOutcome> {
     const result = await executeGovernedResponse({
       ledger: record.ledger,
@@ -754,7 +757,8 @@ export class GovernedJobService {
       context,
       requestedMaxOutputTokens: maxOutputTokens,
       minimumUsefulOutputTokens: minimumOutputTokens,
-      phase: attempt.phase
+      phase: attempt.phase,
+      signal
     });
     const execution = structuredClone(executionView(result));
     if (result.status === "denied") {

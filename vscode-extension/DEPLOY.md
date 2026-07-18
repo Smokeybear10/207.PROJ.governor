@@ -15,8 +15,9 @@ npm run package
 This compiles `src/**` → `out/**` and runs `vsce package --no-dependencies`,
 producing `token-governor-vscode.vsix` in the extension root. What lands inside
 the VSIX is controlled by [`.vscodeignore`](./.vscodeignore): the compiled
-`out/**` JavaScript, `package.json`, `README.md`, and `media/**` are included;
-TypeScript sources, tests, source maps, and tooling are excluded.
+extension, bundled local server, repair fixture, `package.json`, `README.md`,
+and `media/**` are included; TypeScript sources, build tests, source maps, and
+tooling are excluded.
 
 ## Mock publish (default)
 
@@ -26,7 +27,7 @@ npm run publish:mock
 
 This runs [`scripts/mock-publish.mjs`](./scripts/mock-publish.mjs), which:
 
-1. Compiles and packages the extension (`npm run compile` then `npm run package`).
+1. Builds and packages the extension (`npm run package`).
 2. Locates the produced `.vsix` and reads its size plus name/version/publisher
    from `package.json`.
 3. Prints a Marketplace-style receipt and writes a JSON receipt to
@@ -35,7 +36,7 @@ This runs [`scripts/mock-publish.mjs`](./scripts/mock-publish.mjs), which:
    ```json
    {
      "name": "token-governor-vscode",
-     "version": "0.1.0",
+     "version": "0.2.0",
      "publisher": "governor",
      "vsix": "token-governor-vscode.vsix",
      "bytes": 12345,
@@ -63,10 +64,21 @@ are present, the script runs `vsce publish` against the packaged VSIX and
 publishes to `https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode`.
 `vsce` reads `VSCE_PAT` from the environment, so the token is never passed on
 the command line or echoed to logs. If `PUBLISH_REAL=true` is set but no
-`VSCE_PAT` is available, the script safely falls back to a mock publish.
+`VSCE_PAT` is available, the script fails without publishing.
 
 ## CI
 
-CI runs the extension test suite and, when the tests pass, automatically runs
-`npm run publish:mock`. This proves the package builds and produces a valid
-VSIX + receipt on every green build, without requiring a Marketplace secret.
+Normal pushes run backend checks, extension unit tests, the real VS Code host
+suite, dependency audits, and VSIX packaging. They upload the tested VSIX but
+never publish it.
+
+Marketplace publication requires a tag matching the extension version:
+
+```bash
+git tag vscode-v0.2.0
+git push origin vscode-v0.2.0
+```
+
+The release job rejects a tag that does not match `package.json`, and fails if
+the repository `VSCE_PAT` secret is missing. This prevents duplicate or
+accidental Marketplace publishes from ordinary pushes.

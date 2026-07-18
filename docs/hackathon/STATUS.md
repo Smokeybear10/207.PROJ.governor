@@ -7,8 +7,8 @@ before quoting anything.
 ## One-line state
 
 A deterministic budget-control layer for AI agents is built and green
-(238 tests, clean typecheck) across a CLI, a jobs API, two governed
-workloads, and a packaged VS Code extension. The single
+(240 tests, clean typecheck) across a CLI, a jobs API, two governed
+workloads, and a self-contained VS Code extension. The single
 biggest open risk is that **no live OpenAI run has been confirmed** —
 everything demoed so far uses scripted or synthetic providers.
 
@@ -52,7 +52,7 @@ outcome) per the POC findings.
 ## Current health
 
 - **Typecheck:** clean (`npm run typecheck`).
-- **Tests:** 238 passing (`npm test`).
+- **Tests:** 240 passing (`npm test`).
 - **Build:** `npm run build` (TypeScript).
 - **Flaky test:** the repair-sandbox test (`broken-sum`) is timing-sensitive
   and has failed intermittently on a loaded machine, then passed on rerun.
@@ -69,10 +69,11 @@ outcome) per the POC findings.
    (`server/jobs/service.ts`); a server restart wipes it. Deliberate and
    documented; durable storage is Phase 2. Don't migrate mid-hackathon — it
    risks the exact-ledger demo.
-3. **Extension is packaged but not marketplace-published.** It can be installed
-   from the generated VSIX. A real publish still requires a registered
-   publisher and marketplace token; during active editing, run from source
-   (F5) so changes take effect immediately.
+3. **Marketplace 0.2.0 release credentials are not configured in CI.** Version
+   0.1.0 is published at
+   https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode.
+   Version 0.2.0 is packaged locally, but publishing it still requires the
+   repository `VSCE_PAT` secret and a matching `vscode-v0.2.0` tag.
 4. **Prediction is shadow-only.** The forecast/risk layer has no measured
    decision lift yet; keep it labeled non-acting. Enforcement is deterministic
    and real; the forecast is advisory (POC_FINDINGS.md).

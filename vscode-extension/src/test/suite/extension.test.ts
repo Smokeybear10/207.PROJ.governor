@@ -1,21 +1,51 @@
 import * as assert from "assert";
+import * as http from "http";
 import * as vscode from "vscode";
 
 const EXTENSION_ID = "governor.token-governor-vscode";
 
-// Commands registered in src/extension.ts, plus tokenGovernor.runRepair
-// which is added concurrently by another agent.
 const EXPECTED_COMMANDS = [
   "tokenGovernor.healthCheck",
   "tokenGovernor.createJob",
   "tokenGovernor.setActiveJob",
   "tokenGovernor.openJobPanel",
   "tokenGovernor.submitSelection",
+  "tokenGovernor.sendPrompt",
   "tokenGovernor.finalize",
-  "tokenGovernor.runRepair"
+  "tokenGovernor.runRepair",
+  "tokenGovernor.setOpenAiApiKey",
+  "tokenGovernor.clearOpenAiApiKey"
 ];
 
-suite("TokenGovernor extension", () => {
+async function localHealth(): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const request = http.get(
+      "http://127.0.0.1:8787/api/health",
+      { timeout: 5_000 },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          try {
+            assert.strictEqual(response.statusCode, 200);
+            resolve(
+              JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<
+                string,
+                unknown
+              >
+            );
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+    request.on("timeout", () => request.destroy(new Error("health timeout")));
+    request.on("error", reject);
+  });
+}
+
+suite("Governor extension", () => {
   test("is present and activates", async () => {
     const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert.ok(extension, `extension ${EXTENSION_ID} should be installed`);
@@ -41,5 +71,18 @@ suite("TokenGovernor extension", () => {
         `expected command ${command} to be registered`
       );
     }
+  });
+
+  test("starts its packaged local Governor service", async () => {
+    const extension = vscode.extensions.getExtension(EXTENSION_ID);
+    assert.ok(extension, `extension ${EXTENSION_ID} should be installed`);
+    if (!extension.isActive) {
+      await extension.activate();
+    }
+
+    const health = await localHealth();
+    assert.strictEqual(health.service, "token-governor");
+    assert.strictEqual(health.status, "ready");
+    assert.strictEqual(health.governedApi, true);
   });
 });

@@ -155,6 +155,18 @@ function requireBoundedInteger(
   return value;
 }
 
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  if (signal.reason instanceof Error) {
+    throw signal.reason;
+  }
+  const error = new Error("The repair run was cancelled.");
+  error.name = "AbortError";
+  throw error;
+}
+
 function initialInput(sandbox: RepairSandbox): JsonObject[] {
   const paths = sandbox.allowlistedPaths.slice().sort();
   return [
@@ -327,6 +339,7 @@ export async function runGovernedRepair(
   };
 
   for (let turn = 1; turn <= maxWorkResponses; turn += 1) {
+    throwIfAborted(input.signal);
     const requestId = `${jobLabel}:work:${turn}`;
     const result = await session.respond({
       requestId,
@@ -335,7 +348,8 @@ export async function runGovernedRepair(
       instructions: REPAIR_INSTRUCTIONS,
       tools: toolDefinitions,
       maxOutputTokens: workMaxOutputTokens,
-      minimumOutputTokens: workMinimumOutputTokens
+      minimumOutputTokens: workMinimumOutputTokens,
+      signal: input.signal
     });
     emit(responseEvent(++sequence, "work", requestId, result));
 
@@ -402,8 +416,13 @@ export async function runGovernedRepair(
     try {
       toolOutput = isBudgetTool
         ? await budgetTools.execute(parsed.call.name, parsed.call.arguments)
-        : await repairTools.execute(parsed.call.name, parsed.call.arguments);
+        : await repairTools.execute(
+            parsed.call.name,
+            parsed.call.arguments,
+            input.signal
+          );
     } catch (error) {
+      throwIfAborted(input.signal);
       toolOutput = JSON.stringify({
         error: "TOOL_ERROR",
         message: error instanceof Error ? error.name : "unknown"
@@ -451,6 +470,7 @@ export async function runGovernedRepair(
   }
 
   // Final governed summary response (no tools).
+  throwIfAborted(input.signal);
   transcript.push(finalPrompt(testsPassed));
   const finalRequestId = `${jobLabel}:final`;
   const finalResult = await session.respond({
@@ -459,7 +479,8 @@ export async function runGovernedRepair(
     input: [...transcript],
     instructions: REPAIR_INSTRUCTIONS,
     maxOutputTokens: finalMaxOutputTokens,
-    minimumOutputTokens: minimumFinalOutputTokens
+    minimumOutputTokens: minimumFinalOutputTokens,
+    signal: input.signal
   });
   emit(responseEvent(++sequence, "final", finalRequestId, finalResult));
 
@@ -521,7 +542,8 @@ async function safeEvaluate(
 ): Promise<RepairEvaluation | null> {
   try {
     return await evaluateRepair(input.sandbox, input.fixture, input.signal);
-  } catch {
+  } catch (error) {
+    throwIfAborted(input.signal);
     return null;
   }
 }

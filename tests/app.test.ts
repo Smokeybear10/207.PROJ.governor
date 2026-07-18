@@ -1,6 +1,6 @@
 import { once } from "node:events";
+import { request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../server/app.js";
 
@@ -16,11 +16,44 @@ async function startApp(
   return `http://127.0.0.1:${address.port}`;
 }
 
+async function rawGet(
+  baseUrl: string,
+  headers: Record<string, string>
+): Promise<{ readonly status: number; readonly body: unknown }> {
+  const url = new URL("/api/health", baseUrl);
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "GET",
+        headers
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("error", reject);
+        response.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          resolve({
+            status: response.statusCode ?? 0,
+            body: JSON.parse(text) as unknown
+          });
+        });
+      }
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
+
 afterEach(async () => {
   await Promise.all(
     servers.splice(0).map(
       (server) =>
         new Promise<void>((resolve, reject) => {
+          server.closeAllConnections();
           server.close((error) => (error ? reject(error) : resolve()));
         })
     )
@@ -42,6 +75,25 @@ describe("Governor API", () => {
     });
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("x-frame-options")).toBe("DENY");
+  });
+
+  it("rejects non-loopback Host headers and browser-origin requests", async () => {
+    const baseUrl = await startApp();
+    const rebound = await rawGet(baseUrl, {
+      Host: "attacker.example:8787"
+    });
+    expect(rebound.status).toBe(403);
+    expect(rebound.body).toMatchObject({
+      error: { code: "HOST_NOT_ALLOWED" }
+    });
+
+    const browser = await fetch(`${baseUrl}/api/health`, {
+      headers: { Origin: "https://attacker.example" }
+    });
+    expect(browser.status).toBe(403);
+    expect(await browser.json()).toMatchObject({
+      error: { code: "BROWSER_ORIGIN_NOT_ALLOWED" }
+    });
   });
 
   it("can limit a deployment to deterministic demo routes", async () => {

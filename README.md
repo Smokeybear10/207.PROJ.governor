@@ -9,7 +9,9 @@ July 18, 2026.
 The extension keeps budget controls inside the editor. It creates governed
 jobs, submits prompts or selected code, shows settled and reserved spend, warns
 as a job approaches its limit, finalizes responses, and can run the governed
-CI-repair workflow.
+CI-repair workflow. Its loopback-only service is bundled in the extension and
+starts automatically; installing the Marketplace extension does not require a
+repository clone or a separate terminal process.
 
 There is no hosted web application. The extension connects to the local
 Governor service at `http://127.0.0.1:8787`.
@@ -33,11 +35,14 @@ request's conservative maximum cost, caps the output to the remaining safe
 budget, dispatches once, and settles provider-reported usage. A request that
 cannot fit is refused before it can spend.
 
-The local service supports three provider modes:
+The CI-repair workflow supports three provider modes:
 
 - `fake`: deterministic scripted responses, with no network call or charge.
 - `hybrid`: live input-token preflight with scripted generation.
-- `live`: OpenAI generation using `OPENAI_API_KEY`.
+- `live`: OpenAI generation using an API key stored in VS Code Secret Storage.
+
+Typed prompts and editor selections use the live OpenAI provider and fail
+closed until an API key is configured.
 
 ## Extension features
 
@@ -51,18 +56,20 @@ The local service supports three provider modes:
 - Run the sandboxed CI-repair workflow and inspect its sealed evaluation and
   governed trace.
 
-## Run locally
+## Install and use
 
-The local service requires Node.js 18 or later:
+[Install Governor from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode),
+reload the editor, then open the Governor icon in the Activity Bar. The
+packaged local service starts and stops with the extension.
 
-```bash
-npm ci
-npm start
-```
+The deterministic CI-repair demo works immediately without a key. Before
+sending a typed prompt or selected code, run **Governor: Set OpenAI API Key**
+from the Command Palette. The key is kept in VS Code Secret Storage and passed
+only to the managed loopback service.
 
-The default scripted provider is free and requires no API key. To exercise the
-live provider, start the service with `OPENAI_API_KEY` set before creating a
-job.
+For source development, `npm ci && npm start` still runs the local API
+directly. Set `tokenGovernor.autoStartLocalServer` to `false` while using that
+process.
 
 ## Build and install the extension
 
@@ -81,6 +88,8 @@ installation, then open the Governor icon in the Activity Bar.
 The extension settings are:
 
 - `tokenGovernor.apiBaseUrl` (default `http://127.0.0.1:8787`)
+- `tokenGovernor.autoStartLocalServer` (default `true`)
+- `tokenGovernor.requestTimeoutMs` (default `70000`)
 - `tokenGovernor.pollIntervalMs` (default `2000`)
 - `tokenGovernor.defaultFixtureId` (default `broken-sum`)
 - `tokenGovernor.providerMode` (`fake`, `hybrid`, or `live`)
@@ -119,13 +128,14 @@ npm run package
 
 ## Current boundary
 
-The enforcement kernel, local API, extension, CI-repair workflow, and scripted
-provider are implemented and tested. Job state is process-local and is lost
-when the service restarts. The local API is not an authenticated multi-tenant
-service. The extension is published on the
+The enforcement kernel, managed local API, extension, CI-repair workflow, and
+scripted repair provider are implemented and tested. Job state is process-local
+and is lost when the service or editor restarts. The API accepts loopback
+requests only and is not an authenticated multi-tenant service. The extension
+is published on the
 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode);
-CI produces an installable VSIX and performs a mock publish when publisher
-credentials are absent.
+CI produces an installable VSIX on normal changes, while versioned
+`vscode-v*` tags are the only Marketplace release trigger.
 
 See [docs/GOVERNOR.md](docs/GOVERNOR.md) for the technical design,
 [docs/CI_REPAIR.md](docs/CI_REPAIR.md) for the repair workflow, and

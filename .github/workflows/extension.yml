@@ -2,20 +2,32 @@ name: VS Code Extension
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - "vscode-v*"
     paths:
       - "vscode-extension/**"
+      - "server/**"
+      - "tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
       - ".github/workflows/extension.yml"
   pull_request:
     paths:
       - "vscode-extension/**"
+      - "server/**"
+      - "tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
       - ".github/workflows/extension.yml"
+  workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: vscode-extension
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -25,29 +37,55 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: vscode-extension/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            vscode-extension/package-lock.json
 
-      - name: Install dependencies
+      - name: Install backend dependencies
         run: npm ci
 
-      - name: Type check
+      - name: Verify bundled backend
+        run: npm run check
+
+      - name: Audit backend dependencies
+        run: npm audit
+
+      - name: Install extension dependencies
+        working-directory: vscode-extension
+        run: npm ci
+
+      - name: Type check extension
+        working-directory: vscode-extension
         run: npm run typecheck
 
-      - name: Unit tests (vitest)
+      - name: Unit test extension
+        working-directory: vscode-extension
         run: npm test
 
-      # Install a virtual framebuffer so the headless runner can launch the
-      # VS Code Electron test host, then run the integration test suite.
       - name: Install xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
       - name: VS Code integration tests
+        working-directory: vscode-extension
         run: xvfb-run -a npm run test:vscode
 
-  # On every push to main, once tests pass, (mock) publish the extension.
+      - name: Package VSIX
+        working-directory: vscode-extension
+        run: npm run package
+
+      - name: Audit extension dependencies
+        working-directory: vscode-extension
+        run: npm audit
+
+      - name: Upload tested VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-governor-vscode
+          path: vscode-extension/token-governor-vscode.vsix
+
   publish:
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/vscode-v')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -66,24 +104,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
+      - name: Verify release tag matches manifest
+        run: test "$GITHUB_REF_NAME" = "vscode-v$(node -p "require('./package.json').version")"
 
-      # Publishes for real when a `VSCE_PAT` repository secret is present,
-      # otherwise falls back to a no-secret mock deploy. The publish:mock
-      # script does a real `vsce publish` only when PUBLISH_REAL=true AND
-      # VSCE_PAT is set. NOTE: the Marketplace rejects a duplicate version,
-      # so bump `version` in vscode-extension/package.json to ship an update.
-      - name: Publish to Marketplace (real if VSCE_PAT set, else mock)
+      - name: Require Marketplace credentials
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-          PUBLISH_REAL: ${{ secrets.VSCE_PAT != '' && 'true' || 'false' }}
+        run: test -n "$VSCE_PAT"
+
+      - name: Publish to Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          PUBLISH_REAL: "true"
         run: npm run publish:mock
 
-      - name: Upload extension artifacts
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: token-governor-vscode
+          name: token-governor-vscode-release
           path: |
             vscode-extension/token-governor-vscode.vsix
-            vscode-extension/dist/mock-marketplace-receipt.json

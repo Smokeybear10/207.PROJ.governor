@@ -91,6 +91,7 @@ afterEach(async () => {
     servers.splice(0).map(
       (server) =>
         new Promise<void>((resolve, reject) => {
+          server.closeAllConnections();
           server.close((error) => (error ? reject(error) : resolve()));
         })
     )
@@ -468,6 +469,59 @@ describe("governed jobs API", () => {
       }
     });
     expect(body.job.accounting.reserved_micro_usd).toBeGreaterThan(0);
+  });
+
+  it("aborts provider work when the HTTP client disconnects", async () => {
+    let observedSignal:
+      | ((signal: AbortSignal | undefined) => void)
+      | undefined;
+    const signalObserved = new Promise<AbortSignal | undefined>((resolve) => {
+      observedSignal = resolve;
+    });
+    const provider: ResponsesProvider = {
+      async countInput(_context, signal) {
+        observedSignal?.(signal);
+        return await new Promise<number>((resolve, reject) => {
+          const timeout = setTimeout(() => resolve(100), 2_000);
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timeout);
+              reject(
+                signal.reason instanceof Error
+                  ? signal.reason
+                  : new Error("aborted")
+              );
+            },
+            { once: true }
+          );
+        });
+      },
+      async createResponse() {
+        throw new Error("must not dispatch");
+      }
+    };
+    const { baseUrl } = await startApp(provider);
+    expect((await createJob(baseUrl)).status).toBe(201);
+
+    const controller = new AbortController();
+    const response = fetch(`${baseUrl}/v1/jobs/job_test/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request_id: "client-disconnect",
+        phase: "work",
+        input: "Cancel this request."
+      }),
+      signal: controller.signal
+    });
+    const providerSignal = await signalObserved;
+    controller.abort();
+
+    await expect(response).rejects.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(providerSignal).toBeDefined();
+    expect(providerSignal?.aborted).toBe(true);
   });
 
   it("stores and replays definitive provider rejection receipts", async () => {

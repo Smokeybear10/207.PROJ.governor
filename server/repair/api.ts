@@ -37,6 +37,7 @@ function scriptedProviderFor(fixtureId: string): ScriptedResponsesProvider {
 export interface RepairRunOptions {
   readonly fixtureId?: string;
   readonly mode?: ProviderMode;
+  readonly signal?: AbortSignal;
 }
 
 export interface RepairRunResponse {
@@ -72,7 +73,8 @@ export async function runRepairDemo(
       budgetUsd: DEMO_BUDGET_USD,
       maxResponses: DEMO_MAX_RESPONSES,
       finalInputTokenLimit: DEMO_FINAL_INPUT_TOKEN_LIMIT,
-      minimumFinalOutputTokens: DEMO_MINIMUM_FINAL_OUTPUT_TOKENS
+      minimumFinalOutputTokens: DEMO_MINIMUM_FINAL_OUTPUT_TOKENS,
+      signal: options.signal
     });
     const policy: GovernorPolicy = {
       applicationCeilingMicroUsd: result.accounting.applicationCeilingMicroUsd,

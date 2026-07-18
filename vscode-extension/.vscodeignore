@@ -22,6 +22,9 @@ vitest.config.ts
 **/*.test.*
 out/test/**
 
+# The packaged CI-repair fixture includes its sealed test file at runtime.
+!out/fixtures/**
+
 # --- Editor / tooling / CI metadata ---
 .vscode/**
 .github/**

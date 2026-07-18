@@ -27,16 +27,16 @@ code are not part of the extension deliverable.
 - VS Code Activity Bar view, status bar risk state, and governed commands.
 - Sandboxed CI-repair with allowlisted edits and isolated final evaluation.
 - Scripted, hybrid, and live provider modes.
-- Installable VSIX packaging and extension CI.
+- Self-contained VSIX packaging with a managed loopback service.
+- Secure OpenAI key storage through VS Code Secret Storage.
+- Published [VS Code Marketplace extension](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode).
 
 ## Run
 
-```bash
-npm start
-```
-
-Then install or launch the extension from `vscode-extension/`. The extension
-connects to `http://127.0.0.1:8787` by default.
+Install Governor from the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode).
+The packaged service starts automatically at `http://127.0.0.1:8787`; a
+separate `npm start` process is only needed for source development.
 
 ## Verification
 

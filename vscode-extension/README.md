@@ -4,7 +4,9 @@
 
 Budget control for AI jobs inside the editor. The extension talks to the
 Governor API (`/v1/jobs`) and shows spend, reservations, and risk live
-while work runs through the governor.
+while work runs through the governor. The local API is bundled in the VSIX and
+starts automatically, so a Marketplace install does not require cloning this
+repository or keeping a terminal process open.
 
 ## Overview
 
@@ -47,6 +49,7 @@ gamed.
     create a job if none is active)
   - Finalize Pending Response (accept/reject a settled final output)
   - Run Governed CI-Repair (runs the repair agent on a fixture under budget)
+  - Set OpenAI API Key / Clear OpenAI API Key (uses VS Code Secret Storage)
 
 ## How it saves money
 
@@ -80,28 +83,27 @@ On the roadmap:
 - ◻ **Ignore unreliable tests** — don't waste tries "fixing" tests that
   randomly fail on their own.
 
-## Run it (demo)
+## Run it
 
-1. Start the governor server from the repo root:
-
-   ```bash
-   npm start                      # scripted provider ($0)
-   OPENAI_API_KEY=... npm start   # live OpenAI calls
-   ```
-
-   For live calls, set `OPENAI_API_KEY` first and create the job afterward.
-
+1. Install Governor from the Marketplace and reload the editor.
 2. Open the Governor view: click the Governor icon in the Activity Bar, or run
    **Governor: Open Job View** from the Command Palette.
-
 3. Click **Run CI-Repair** to watch a governed repair run end to end, or
-   **Create Job** → budget `0.075`, select text in any file, then **Submit
-   Selection Through Governor**. Watch the status bar and sidebar update as the
-   governor reserves, settles, and (when over budget) refuses requests.
+   **Create Job** → budget `0.075`. The default repair run is deterministic and
+   makes no network call.
+4. Before sending a prompt or editor selection, run **Governor: Set OpenAI API
+   Key**. Then use **Send Prompt Through Governor** or **Submit Selection
+   Through Governor** and watch the status bar update as Governor reserves,
+   settles, and refuses requests that cannot fit.
+
+The key is stored in VS Code Secret Storage and passed only to the managed
+loopback service. Governor does not host a web application or remote API.
 
 ## Settings
 
 - `tokenGovernor.apiBaseUrl` (default `http://127.0.0.1:8787`)
+- `tokenGovernor.autoStartLocalServer` (default `true`)
+- `tokenGovernor.requestTimeoutMs` (default `70000`)
 - `tokenGovernor.pollIntervalMs` (default `2000`)
 - `tokenGovernor.defaultFixtureId` (default `broken-sum`)
 - `tokenGovernor.providerMode` (`fake` | `hybrid` | `live`, default `fake`)

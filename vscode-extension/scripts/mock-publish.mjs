@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // mock-publish.mjs — MOCK VS Code Marketplace deployment.
 //
-// This performs a full package build (compile + `vsce package`) and then a
+// This performs a full package build (`vsce package`) and then a
 // *mock* marketplace publish that requires no secrets and never touches the
 // real Marketplace. A real publish only happens when BOTH VSCE_PAT is set and
 // PUBLISH_REAL === "true".
@@ -71,17 +71,19 @@ if (!name || !version || !publisher) {
 }
 const itemName = `${publisher}.${name}`;
 const marketplaceUrl = `https://marketplace.visualstudio.com/items?itemName=${itemName}`;
+const wantsReal = process.env.PUBLISH_REAL === "true";
+const hasPat = Boolean(process.env.VSCE_PAT);
+
+if (wantsReal && !hasPat) {
+  fail("PUBLISH_REAL=true requires VSCE_PAT; nothing was published.");
+}
 
 // --- Step 1: build + package -------------------------------------------------
-log("step 1/3", "compiling TypeScript (npm run compile)");
-run(npmCmd, ["run", "compile"], "compile");
-if (!fs.existsSync(OUT_DIR)) {
-  fail(`compile did not produce ${path.relative(EXT_ROOT, OUT_DIR)}/`);
-}
-ok("compiled sources to out/");
-
-log("step 1/3", "packaging VSIX (npm run package)");
+log("step 1/3", "building and packaging VSIX (npm run package)");
 run(npmCmd, ["run", "package"], "package");
+if (!fs.existsSync(OUT_DIR)) {
+  fail(`package did not produce ${path.relative(EXT_ROOT, OUT_DIR)}/`);
+}
 
 // --- Step 2: locate + inspect the VSIX --------------------------------------
 log("step 2/3", "locating packaged .vsix");
@@ -92,9 +94,6 @@ const bytes = fs.statSync(VSIX_PATH).size;
 ok(`found ${VSIX_NAME} (${humanBytes(bytes)})`);
 
 // --- Step 3: publish (mock, unless explicitly real) --------------------------
-const wantsReal = process.env.PUBLISH_REAL === "true";
-const hasPat = Boolean(process.env.VSCE_PAT);
-
 if (wantsReal && hasPat) {
   // REAL publish path. Not exercised in mock mode. `vsce` reads VSCE_PAT from
   // the environment, so no token is echoed to logs.
@@ -114,9 +113,6 @@ if (wantsReal && hasPat) {
 }
 
 // MOCK publish path (default).
-if (wantsReal && !hasPat) {
-  log("step 3/3", "PUBLISH_REAL=true but VSCE_PAT is unset → falling back to MOCK");
-}
 log("step 3/3", "MOCK marketplace publish (no secrets, no network)");
 
 const timestamp = new Date().toISOString();

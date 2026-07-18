@@ -94,7 +94,7 @@ export interface RepairSandbox {
 /** Local OpenAI function-tool definitions + a JSON-string dispatcher. */
 export interface RepairToolbox {
   readonly definitions: readonly JsonObject[];
-  execute(name: string, args: unknown): Promise<string>;
+  execute(name: string, args: unknown, signal?: AbortSignal): Promise<string>;
   /** Current working-tree revision (for retry-suppression stateRevision). */
   revision(): string;
 }
