@@ -203,6 +203,14 @@ code {
   box-shadow: 0 0 0 4px rgb(49 95 159 / 12%);
 }
 
+.operation-status--paused {
+  color: var(--amber);
+}
+
+.operation-status--paused .status-dot {
+  background: var(--amber);
+}
+
 .operation-status--complete .status-dot {
   background: var(--green);
 }
@@ -396,6 +404,14 @@ code {
 .button--secondary:hover:not(:disabled) {
   border-color: #8b9c95;
   background: var(--surface-subtle);
+}
+
+.button--icon,
+.command-actions .button--icon {
+  width: 42px;
+  min-width: 42px;
+  flex: 0 0 42px;
+  padding: 0;
 }
 
 .spin {

@@ -8,10 +8,12 @@ import {
   Gauge,
   GitPullRequest,
   LockKeyhole,
+  Pause,
   Play,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
+  StepForward,
   Terminal,
   TriangleAlert,
   XCircle,
@@ -47,6 +49,7 @@ type PlaybackStatus =
   | "empty"
   | "requesting"
   | "playing"
+  | "paused"
   | "complete"
   | "error";
 
@@ -167,20 +170,34 @@ function actionParts(action: TraceAction | string): TraceAction {
 }
 
 function AppHeader({
+  catalogStatus,
   playbackStatus
 }: {
+  catalogStatus: CatalogStatus;
   playbackStatus: PlaybackStatus;
 }): React.JSX.Element {
   const operationalLabel =
-    playbackStatus === "requesting"
+    catalogStatus === "loading"
+      ? "LOADING CATALOG"
+      : catalogStatus === "error"
+        ? "CATALOG ERROR"
+        : playbackStatus === "requesting"
       ? "LOADING FIXTURE"
       : playbackStatus === "playing"
         ? "PLAYING TRACE"
+        : playbackStatus === "paused"
+          ? "TRACE PAUSED"
         : playbackStatus === "complete"
           ? "TRACE COMPLETE"
           : playbackStatus === "error"
             ? "ATTENTION"
             : "READY";
+  const statusClass =
+    catalogStatus === "loading"
+      ? "requesting"
+      : catalogStatus === "error"
+        ? "error"
+        : playbackStatus;
 
   return (
     <header className="app-header">
@@ -197,7 +214,7 @@ function AppHeader({
             GOVERNOR CORE / SCRIPTED INPUTS / 0 EXTERNAL CALLS
           </span>
           <span
-            className={`operation-status operation-status--${playbackStatus}`}
+            className={`operation-status operation-status--${statusClass}`}
             aria-live="polite"
           >
             <span className="status-dot" aria-hidden="true" />
@@ -305,9 +322,14 @@ function CommandBand({
   catalogStatus,
   playbackStatus,
   canReplay,
+  canStep,
   onScenarioChange,
   onControllerChange,
   onRun,
+  onPause,
+  onResume,
+  onStep,
+  onRestart,
   onReplay
 }: {
   catalog: DemoCatalog | null;
@@ -317,18 +339,34 @@ function CommandBand({
   catalogStatus: CatalogStatus;
   playbackStatus: PlaybackStatus;
   canReplay: boolean;
+  canStep: boolean;
   onScenarioChange: (scenarioId: string) => void;
   onControllerChange: (controller: Controller) => void;
   onRun: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onStep: () => void;
+  onRestart: () => void;
   onReplay: () => void;
 }): React.JSX.Element {
-  const isBusy =
-    playbackStatus === "requesting" || playbackStatus === "playing";
-  const controlsDisabled = catalogStatus !== "ready" || isBusy;
+  const controlsDisabled =
+    catalogStatus !== "ready" ||
+    playbackStatus === "requesting" ||
+    playbackStatus === "playing";
+  const primaryDisabled =
+    catalogStatus !== "ready" ||
+    playbackStatus === "requesting" ||
+    !scenarioId;
 
   function submit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
-    onRun();
+    if (playbackStatus === "playing") {
+      onPause();
+    } else if (playbackStatus === "paused") {
+      onResume();
+    } else {
+      onRun();
+    }
   }
 
   return (
@@ -372,19 +410,46 @@ function CommandBand({
           <button
             className="button button--primary"
             type="submit"
-            disabled={controlsDisabled || !scenarioId}
+            disabled={primaryDisabled}
           >
-            {isBusy ? (
+            {playbackStatus === "requesting" ? (
               <RefreshCw className="spin" size={17} aria-hidden="true" />
+            ) : playbackStatus === "playing" ? (
+              <Pause size={17} fill="currentColor" aria-hidden="true" />
             ) : (
               <Play size={17} fill="currentColor" aria-hidden="true" />
             )}
             {playbackStatus === "requesting"
               ? "Loading fixture"
               : playbackStatus === "playing"
-                ? "Playing trace"
+                ? "Pause trace"
+                : playbackStatus === "paused"
+                  ? "Resume trace"
                 : "Play scripted trace"}
           </button>
+          {playbackStatus === "paused" && (
+            <>
+              <button
+                className="button button--secondary button--icon"
+                type="button"
+                aria-label="Step to next event"
+                title="Step to next event"
+                disabled={!canStep}
+                onClick={onStep}
+              >
+                <StepForward size={18} aria-hidden="true" />
+              </button>
+              <button
+                className="button button--secondary button--icon"
+                type="button"
+                aria-label="Restart trace"
+                title="Restart trace"
+                onClick={onRestart}
+              >
+                <RotateCcw size={17} aria-hidden="true" />
+              </button>
+            </>
+          )}
           {canReplay && (
             <button
               className="button button--secondary"
@@ -514,7 +579,11 @@ function AccountingBand({
   const percentage = (value: number): string =>
     `${Math.min(100, (value / ceiling) * 100)}%`;
   const statusLabel =
-    playbackStatus === "playing" ? "PLAYING TRACE" : "TRACE COMPLETE";
+    playbackStatus === "playing"
+      ? "PLAYING TRACE"
+      : playbackStatus === "paused"
+        ? "TRACE PAUSED"
+        : "TRACE COMPLETE";
 
   return (
     <section className="accounting-band" aria-labelledby="accounting-title">
@@ -1106,7 +1175,6 @@ export default function App(): React.JSX.Element {
   const [playbackStatus, setPlaybackStatus] =
     useState<PlaybackStatus>("empty");
   const [visibleCount, setVisibleCount] = useState(0);
-  const [playbackVersion, setPlaybackVersion] = useState(0);
   const [isReplay, setIsReplay] = useState(false);
   const [runError, setRunError] = useState("");
   const runAbortRef = useRef<AbortController | null>(null);
@@ -1150,36 +1218,44 @@ export default function App(): React.JSX.Element {
       return;
     }
 
-    if (trace.events.length === 0) {
-      setPlaybackStatus("complete");
-      return;
+    if (visibleCount >= trace.events.length) {
+      const completionTimer = window.setTimeout(
+        () => setPlaybackStatus("complete"),
+        300
+      );
+      return () => window.clearTimeout(completionTimer);
     }
 
-    const timers = trace.events.map((event, index) =>
-      window.setTimeout(
-        () => setVisibleCount(index + 1),
-        Math.max(0, event.offsetMs)
-      )
-    );
-    const finalOffset = Math.max(
-      0,
-      trace.events[trace.events.length - 1]?.offsetMs ?? 0
-    );
-    const completionTimer = window.setTimeout(
-      () => setPlaybackStatus("complete"),
-      finalOffset + 300
+    const previousOffset =
+      visibleCount === 0
+        ? 0
+        : (trace.events[visibleCount - 1]?.offsetMs ?? 0);
+    const nextOffset = trace.events[visibleCount]?.offsetMs ?? previousOffset;
+    const eventTimer = window.setTimeout(
+      () =>
+        setVisibleCount((current) =>
+          Math.min(current + 1, trace.events.length)
+        ),
+      Math.max(0, nextOffset - previousOffset)
     );
 
-    return () => {
-      timers.forEach((timer) => window.clearTimeout(timer));
-      window.clearTimeout(completionTimer);
-    };
-  }, [playbackStatus, playbackVersion, trace]);
+    return () => window.clearTimeout(eventTimer);
+  }, [playbackStatus, trace, visibleCount]);
 
   const selectedScenario = useMemo(
     () => catalog?.scenarios.find((scenario) => scenario.id === scenarioId),
     [catalog, scenarioId]
   );
+
+  const clearRun = useCallback((): void => {
+    runAbortRef.current?.abort();
+    runAbortRef.current = null;
+    setTrace(null);
+    setVisibleCount(0);
+    setIsReplay(false);
+    setRunError("");
+    setPlaybackStatus("empty");
+  }, []);
 
   const runDemo = useCallback(async (): Promise<void> => {
     if (!scenarioId || catalogStatus !== "ready") {
@@ -1196,18 +1272,13 @@ export default function App(): React.JSX.Element {
     setPlaybackStatus("requesting");
 
     try {
+      const input = { scenarioId, controller };
       const response = await createDemoRun(
-        { scenarioId, controller },
+        input,
         abortController.signal
       );
-      setTrace({
-        ...response,
-        events: [...response.events].sort(
-          (left, right) => left.offsetMs - right.offsetMs
-        )
-      });
+      setTrace(response);
       setPlaybackStatus("playing");
-      setPlaybackVersion((version) => version + 1);
     } catch (error: unknown) {
       if (abortController.signal.aborted) {
         return;
@@ -1221,6 +1292,40 @@ export default function App(): React.JSX.Element {
     }
   }, [catalogStatus, controller, scenarioId]);
 
+  const pause = useCallback((): void => {
+    setPlaybackStatus((current) =>
+      current === "playing" ? "paused" : current
+    );
+  }, []);
+
+  const resume = useCallback((): void => {
+    if (!trace || visibleCount >= trace.events.length) {
+      return;
+    }
+    setPlaybackStatus("playing");
+  }, [trace, visibleCount]);
+
+  const step = useCallback((): void => {
+    if (!trace) {
+      return;
+    }
+    const nextCount = Math.min(visibleCount + 1, trace.events.length);
+    setVisibleCount(nextCount);
+    setPlaybackStatus(
+      nextCount >= trace.events.length ? "complete" : "paused"
+    );
+  }, [trace, visibleCount]);
+
+  const restart = useCallback((): void => {
+    if (!trace) {
+      return;
+    }
+    setVisibleCount(0);
+    setIsReplay(true);
+    setPlaybackStatus("paused");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [trace]);
+
   const replay = useCallback((): void => {
     if (!trace) {
       return;
@@ -1228,9 +1333,30 @@ export default function App(): React.JSX.Element {
     setVisibleCount(0);
     setIsReplay(true);
     setPlaybackStatus("playing");
-    setPlaybackVersion((version) => version + 1);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, [trace]);
+
+  const changeScenario = useCallback(
+    (nextScenarioId: string): void => {
+      if (nextScenarioId === scenarioId) {
+        return;
+      }
+      clearRun();
+      setScenarioId(nextScenarioId);
+    },
+    [clearRun, scenarioId]
+  );
+
+  const changeController = useCallback(
+    (nextController: Controller): void => {
+      if (nextController === controller) {
+        return;
+      }
+      clearRun();
+      setController(nextController);
+    },
+    [clearRun, controller]
+  );
 
   let content: React.JSX.Element;
 
@@ -1272,7 +1398,10 @@ export default function App(): React.JSX.Element {
 
   return (
     <div className="app-shell">
-      <AppHeader playbackStatus={playbackStatus} />
+      <AppHeader
+        catalogStatus={catalogStatus}
+        playbackStatus={playbackStatus}
+      />
       <main className="dashboard-main">
         <CommandBand
           catalog={catalog}
@@ -1282,9 +1411,18 @@ export default function App(): React.JSX.Element {
           catalogStatus={catalogStatus}
           playbackStatus={playbackStatus}
           canReplay={Boolean(trace && playbackStatus === "complete")}
-          onScenarioChange={setScenarioId}
-          onControllerChange={setController}
+          canStep={Boolean(
+            trace &&
+              playbackStatus === "paused" &&
+              visibleCount < trace.events.length
+          )}
+          onScenarioChange={changeScenario}
+          onControllerChange={changeController}
           onRun={() => void runDemo()}
+          onPause={pause}
+          onResume={resume}
+          onStep={step}
+          onRestart={restart}
           onReplay={replay}
         />
         {content}

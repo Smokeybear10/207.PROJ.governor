@@ -95,6 +95,25 @@ describe("deterministic demo catalog", () => {
       "Large failing test log"
     );
   });
+
+  it("publishes safe benchmark totals derived from settled run receipts", () => {
+    const catalog = getDemoCatalog();
+
+    for (const row of catalog.benchmark.comparisonRows) {
+      const expectedTotal = catalog.scenarios.reduce(
+        (total, scenario) =>
+          total +
+          createDemoRun({
+            scenarioId: scenario.id,
+            controller: row.controller
+          }).finalSummary.settledMicroUsd,
+        0
+      );
+
+      expect(Number.isSafeInteger(row.totalSettledMicroUsd)).toBe(true);
+      expect(row.totalSettledMicroUsd).toBe(expectedTotal);
+    }
+  });
 });
 
 describe("demo trace invariants", () => {

@@ -14,6 +14,7 @@ async function gotoDashboard(page: Page): Promise<void> {
 type MockOptions = {
   runDelayMs?: number;
   runStatus?: number;
+  eventIntervalMs?: number;
   mutateCatalog?: (value: Record<string, unknown>) => void;
   mutateRun?: (value: Record<string, unknown>) => void;
 };
@@ -99,7 +100,7 @@ async function mockDemoApi(
     if (Array.isArray(response.events)) {
       response.events = response.events.map((event, index) => ({
         ...(event as Record<string, unknown>),
-        offsetMs: index * 100
+        offsetMs: index * (options.eventIntervalMs ?? 100)
       }));
     }
     options.mutateRun?.(response);
@@ -195,6 +196,25 @@ test("posts selected scenario and controller using the agreed contract", async (
   await expect(page.locator("body")).not.toContainText(/active predictor/i);
 });
 
+test("rejects a run response for a different requested operation", async ({
+  page
+}) => {
+  await mockDemoApi(page, {
+    mutateRun(value) {
+      value.scenarioId = "clean-small-diff";
+    }
+  });
+  await gotoDashboard(page);
+
+  await page.getByRole("button", { name: "Play scripted trace" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("Demo run unavailable");
+  await expect(page.getByRole("alert")).toContainText(
+    "Run response identity did not match the requested scenario and controller."
+  );
+  await expect(page.getByText("PLAYING TRACE", { exact: true })).toHaveCount(0);
+});
+
 test("plays ordered events, completes, and replays without another POST", async ({
   page
 }) => {
@@ -266,6 +286,65 @@ test("plays ordered events, completes, and replays without another POST", async 
   ).toHaveLength(1);
 });
 
+test("pauses, steps, restarts, and resumes one immutable trace", async ({
+  page
+}) => {
+  const mock = await mockDemoApi(page, { eventIntervalMs: 1_000 });
+  await gotoDashboard(page);
+
+  await page.getByRole("button", { name: "Play scripted trace" }).click();
+  const timeline = page.getByRole("region", { name: "Execution timeline" });
+  await expect(timeline.getByText("Synthetic review started")).toBeVisible();
+
+  await page.getByRole("button", { name: "Pause trace" }).click();
+  await expect(page.getByText("TRACE PAUSED", { exact: true }).first()).toBeVisible();
+  await page.waitForTimeout(1_100);
+  await expect(timeline.getByText("Opening request admitted")).not.toBeVisible();
+
+  await page.getByRole("button", { name: "Step to next event" }).click();
+  await expect(timeline.getByText("Opening request admitted")).toBeVisible();
+
+  await page.getByRole("button", { name: "Restart trace" }).click();
+  await expect(timeline.getByText("Synthetic review started")).not.toBeVisible();
+
+  await page.getByRole("button", { name: "Resume trace" }).click();
+  await expect(timeline.getByText("Synthetic review started")).toBeVisible();
+  await page.getByRole("button", { name: "Pause trace" }).click();
+  expect(mock.requests).toHaveLength(1);
+});
+
+test("changing the catalog selection invalidates completed replay", async ({
+  page
+}) => {
+  const mock = await mockDemoApi(page);
+  await gotoDashboard(page);
+
+  await page.getByRole("button", { name: "Play scripted trace" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Quality-gated comparison" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Replay scripted trace" })
+  ).toBeVisible();
+
+  await page.getByLabel("Scenario").selectOption("clean-small-diff");
+
+  await expect(
+    page.getByRole("button", { name: "Replay scripted trace" })
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Clean small diff" })
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Play scripted trace" }).click();
+  await expect
+    .poll(() => mock.requests)
+    .toEqual([
+      { scenarioId: "large-failing-log", controller: "static" },
+      { scenarioId: "clean-small-diff", controller: "static" }
+    ]);
+});
+
 test("shows a useful backend error without losing run controls", async ({
   page
 }) => {
@@ -301,6 +380,26 @@ test("fails closed when catalog provenance is missing", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: "Play scripted trace" })
   ).toBeDisabled();
+});
+
+test("fails closed when a catalog benchmark total is invalid", async ({
+  page
+}) => {
+  await mockDemoApi(page, {
+    mutateCatalog(value) {
+      const benchmark = value.benchmark as Record<string, unknown>;
+      const rows = benchmark.comparisonRows as Array<Record<string, unknown>>;
+      rows[0]!.totalSettledMicroUsd = null;
+    }
+  });
+  await gotoDashboard(page);
+
+  await expect(page.getByRole("alert")).toContainText(
+    "Demo catalog unavailable"
+  );
+  await expect(page.getByRole("alert")).toContainText(
+    "Benchmark totalSettledMicroUsd is invalid in the demo contract."
+  );
 });
 
 test("fails closed when run provenance is missing", async ({ page }) => {
