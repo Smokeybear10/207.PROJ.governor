@@ -48,9 +48,17 @@ governor API without leaving the editor.
 - [x] Command: `Governor: Submit Selection Through Governor` (POSTs the
       editor selection to /v1/jobs/:id/responses)
 - [x] Command: `Governor: Finalize Pending Response`
-- [ ] Validate end to end in the Extension Development Host (F5) against the
-      local server, then against a live `OPENAI_API_KEY` run with Aryan
-- [ ] Screenshot the status bar + panel for the pitch
+- [x] Moved the sidebar into a vertical Activity Bar webview view
+      (Governor icon, `Open Job View`) instead of a wide editor panel
+- [x] API contract smoke-tested against the live local server: job create,
+      job show, and submit-response (correctly refuses with
+      `PROVIDER_NOT_CONFIGURED` when no key is set, which the extension's
+      error handling already catches as a warning, not a crash)
+- [ ] Press F5 yourself, confirm the sidebar renders and the status bar
+      updates live (needs a real VS Code GUI, can't be done headless)
+- [ ] Repeat against a live `OPENAI_API_KEY` run with Aryan once he has one
+      going, to get a real (non-refused) trace through the extension
+- [ ] Screenshot the sidebar + status bar for the pitch
 - Done means: create a job, submit work, and watch spend + risk update in the
   status bar, live in front of a judge.
 
@@ -58,9 +66,12 @@ governor API without leaving the editor.
 
 - [x] Restore `server/artifacts/` swallowed by `.gitignore`
 - [x] Hackathon announcements + strategy docs
+- [x] Intervention checklist (docs/hackathon/INTERVENTIONS.md)
 - Dashboard work is handed off; no more dashboard changes from Aarav.
 
-### 3. Stretch (only if extension is demo-ready early)
+### 3. Stretch — reassign, don't duplicate
 
-- [ ] Evaluation runner: score frozen runs against sealed ground truth,
-      cost per successful task (original scope, superseded by the extension)
+Evaluation runner (score frozen runs against sealed ground truth, cost per
+successful task) was listed here as a fallback. If Aryan has actually
+picked this up, drop it from Aarav's list entirely — confirm with him so
+nobody builds it twice.
