@@ -29,9 +29,16 @@
         "title": "Health Check"
       },
       {
+        "command": "tokenGovernor.refresh",
+        "category": "Governor",
+        "title": "Refresh Job View",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "tokenGovernor.createJob",
         "category": "Governor",
-        "title": "Create Job"
+        "title": "Create Job",
+        "icon": "$(add)"
       },
       {
         "command": "tokenGovernor.setActiveJob",
@@ -66,7 +73,8 @@
       {
         "command": "tokenGovernor.setOpenAiApiKey",
         "category": "Governor",
-        "title": "Set OpenAI API Key"
+        "title": "Set OpenAI API Key",
+        "icon": "$(key)"
       },
       {
         "command": "tokenGovernor.clearOpenAiApiKey",
@@ -92,6 +100,25 @@
         }
       ]
     },
+    "menus": {
+      "view/title": [
+        {
+          "command": "tokenGovernor.refresh",
+          "when": "view == tokenGovernor.jobView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tokenGovernor.createJob",
+          "when": "view == tokenGovernor.jobView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "tokenGovernor.setOpenAiApiKey",
+          "when": "view == tokenGovernor.jobView",
+          "group": "navigation@3"
+        }
+      ]
+    },
     "configuration": {
       "title": "Governor",
       "properties": {
@@ -106,16 +133,17 @@
           "description": "Automatically start and stop the packaged Governor service for a loopback API URL."
         },
         "tokenGovernor.requestTimeoutMs": {
-          "type": "number",
+          "type": "integer",
           "default": 70000,
           "minimum": 1000,
           "maximum": 300000,
           "description": "Maximum time to wait for a Governor API request, in milliseconds."
         },
         "tokenGovernor.pollIntervalMs": {
-          "type": "number",
+          "type": "integer",
           "default": 2000,
           "minimum": 500,
+          "maximum": 300000,
           "description": "How often to refresh the active job, in milliseconds."
         },
         "tokenGovernor.defaultFixtureId": {

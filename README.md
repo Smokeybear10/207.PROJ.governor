@@ -46,8 +46,8 @@ closed until an API key is configured.
 
 ## Extension features
 
-- Activity Bar view with settled spend, reservations, remaining budget, and
-  request status.
+- Activity Bar view with service/provider health, settled spend, reservations,
+  remaining budget, and recent request status.
 - Status bar risk indicator using the Governor core's `SAFE`, `WATCH`, and
   `AT_RISK` thresholds.
 - Create and select governed jobs without leaving the editor.

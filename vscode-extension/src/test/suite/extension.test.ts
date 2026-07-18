@@ -6,6 +6,7 @@ const EXTENSION_ID = "governor.token-governor-vscode";
 
 const EXPECTED_COMMANDS = [
   "tokenGovernor.healthCheck",
+  "tokenGovernor.refresh",
   "tokenGovernor.createJob",
   "tokenGovernor.setActiveJob",
   "tokenGovernor.openJobPanel",
@@ -73,6 +74,56 @@ suite("Governor extension", () => {
     }
   });
 
+  test("contributes native view actions and integer settings", () => {
+    const extension = vscode.extensions.getExtension(EXTENSION_ID);
+    assert.ok(extension, `extension ${EXTENSION_ID} should be installed`);
+
+    const manifest = extension.packageJSON as {
+      contributes?: {
+        commands?: Array<{ command?: string; icon?: string }>;
+        menus?: {
+          "view/title"?: Array<{ command?: string; when?: string }>;
+        };
+        configuration?: {
+          properties?: Record<string, { type?: string }>;
+        };
+      };
+    };
+    const commands = manifest.contributes?.commands ?? [];
+    const titleActions = manifest.contributes?.menus?.["view/title"] ?? [];
+    const settings = manifest.contributes?.configuration?.properties ?? {};
+
+    assert.ok(
+      commands.some(
+        (command) =>
+          command.command === "tokenGovernor.refresh" &&
+          command.icon === "$(refresh)"
+      ),
+      "refresh should use the native refresh icon"
+    );
+    assert.deepStrictEqual(
+      titleActions.map((action) => action.command),
+      [
+        "tokenGovernor.refresh",
+        "tokenGovernor.createJob",
+        "tokenGovernor.setOpenAiApiKey"
+      ]
+    );
+    assert.ok(
+      titleActions.every(
+        (action) => action.when === "view == tokenGovernor.jobView"
+      )
+    );
+    assert.strictEqual(
+      settings["tokenGovernor.requestTimeoutMs"]?.type,
+      "integer"
+    );
+    assert.strictEqual(
+      settings["tokenGovernor.pollIntervalMs"]?.type,
+      "integer"
+    );
+  });
+
   test("starts its packaged local Governor service", async () => {
     const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert.ok(extension, `extension ${EXTENSION_ID} should be installed`);
@@ -84,5 +135,19 @@ suite("Governor extension", () => {
     assert.strictEqual(health.service, "token-governor");
     assert.strictEqual(health.status, "ready");
     assert.strictEqual(health.governedApi, true);
+  });
+
+  test("runs the deterministic repair command end to end", async () => {
+    const extension = vscode.extensions.getExtension(EXTENSION_ID);
+    assert.ok(extension, `extension ${EXTENSION_ID} should be installed`);
+    if (!extension.isActive) {
+      await extension.activate();
+    }
+
+    await vscode.commands.executeCommand("tokenGovernor.runRepair");
+
+    const health = await localHealth();
+    assert.strictEqual(health.status, "ready");
+    assert.strictEqual(health.providerConfigured, false);
   });
 });

@@ -30,14 +30,16 @@ gamed.
   same risk thresholds the governor core uses (WATCH at 70% committed,
   AT_RISK at 90%).
 - **Sidebar view**: a Governor icon in the Activity Bar opens a vertical
-  job view — committed spend hero number, budget bar (settled + reserved),
-  accounting breakdown, and every submitted request with its phase and
-  status, so you can see which steps to look into. A one-click toolbar drives
-  every action, and CI-repair results (verdict, spend, sealed-evaluation
-  checks, and the full governed trace) render right in the panel. Sits
+  job view with local-service and provider state, committed spend, a segmented
+  budget bar, accounting metrics, and recent requests. Grouped job controls
+  keep the primary repair and prompt actions clear, while refresh, new-job,
+  and API-key actions also live in the native view title. CI-repair results
+  (verdict, spend, sealed-evaluation checks, and the governed trace) render in
+  the panel. Sits
   alongside the file explorer like Copilot does; works in VS Code and Cursor.
 - **Commands** (Cmd+Shift+P, category "Governor"):
   - Health Check
+  - Refresh Job View
   - Create Job (prompts for a USD budget, e.g. `0.075`)
   - Set Active Job
   - Open Job View

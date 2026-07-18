@@ -8,6 +8,10 @@
   recovery.
 - Harden the local API against browser-origin and DNS-rebinding requests.
 - Validate API responses and webview actions before rendering them.
+- Redesign the job view with clearer service, provider, budget, and repair
+  states plus native view-title actions.
+- Validate jobs before switching, cap recent-job history, and normalize
+  integer timeout and polling settings.
 
 ## 0.1.0
 

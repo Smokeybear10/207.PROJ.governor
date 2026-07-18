@@ -14,14 +14,16 @@ extension starts and stops that service automatically.
 - **Status bar**: committed spend / budget for the active job, colored by the
   governor's risk thresholds (WATCH at 70% committed, AT_RISK at 90%).
 - **Sidebar view** (Governor icon in the Activity Bar): committed-spend hero,
-  budget bar (settled + reserved), accounting breakdown, and every submitted
-  request with phase + status. A one-click toolbar drives all actions, and
-  **CI-repair results render in-panel**: verdict, spend, sealed-evaluation
-  checks, and the full governed trace. Works in VS Code and Cursor.
-- **Commands** (Cmd+Shift+P, category "Governor"): Health Check · Create Job ·
-  Set Active Job · Open Job View · Submit Selection Through Governor ·
-  Send Prompt Through Governor · Finalize Pending Response · Run Governed
-  CI-Repair · Set/Clear OpenAI API Key.
+  segmented budget bar (settled + reserved), accounting breakdown, and recent
+  requests with phase + status. Service and provider state stay visible,
+  controls are grouped by workflow, and refresh, new-job, and API-key actions
+  use the native view title. **CI-repair results render in-panel**: verdict,
+  spend, sealed-evaluation checks, and the governed trace. Works in VS Code
+  and Cursor.
+- **Commands** (Cmd+Shift+P, category "Governor"): Health Check · Refresh Job
+  View · Create Job · Set Active Job · Open Job View · Submit Selection
+  Through Governor · Send Prompt Through Governor · Finalize Pending Response
+  · Run Governed CI-Repair · Set/Clear OpenAI API Key.
 
 ## Try it locally
 
