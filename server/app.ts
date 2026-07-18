@@ -18,6 +18,7 @@ export type CreateAppOptions = {
   readonly provider?: ResponsesProvider | null;
   readonly jobIdFactory?: () => string;
   readonly now?: () => Date;
+  readonly exposeGovernedApi?: boolean;
 };
 
 function applySecurityHeaders(
@@ -109,6 +110,7 @@ function configuredProvider(): ResponsesProvider | undefined {
 
 export function createApp(options: CreateAppOptions = {}): Express {
   const app = express();
+  const exposeGovernedApi = options.exposeGovernedApi ?? true;
   const provider =
     options.provider === null
       ? undefined
@@ -130,7 +132,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
       status: "ready",
       mode: "demo",
       providerConfigured: provider !== undefined,
-      governedApi: true
+      governedApi: exposeGovernedApi
     });
   });
 
@@ -172,6 +174,12 @@ export function createApp(options: CreateAppOptions = {}): Express {
         next(new ApiError("REPAIR_RUN_FAILED", errorMessage(error), 400));
       });
   });
+
+  if (!exposeGovernedApi) {
+    app.use("/v1", (_request, _response, next) => {
+      next(new ApiError("NOT_FOUND", "The API route does not exist.", 404));
+    });
+  }
 
   app.post("/v1/jobs", (request, response) => {
     response.set("Cache-Control", "no-store");

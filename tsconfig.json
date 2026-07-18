@@ -18,6 +18,7 @@
     "types": ["node", "vitest/globals"]
   },
   "include": [
+    "api",
     "src",
     "server",
     "cli",

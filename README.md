@@ -1,6 +1,13 @@
-# Governor
+# Governor 207 | Budget-Aware AI Execution
 
 **The budget-aware execution layer for AI agents.**
+
+**Live demo: [governor-207.vercel.app](https://governor-207.vercel.app)**
+
+Built at the Ramp Hackathon in New York City on July 18, 2026. Governor gives
+multi-step AI jobs a deterministic cost boundary: count the proposed request,
+reserve its conservative maximum cost before dispatch, enforce output limits,
+and reconcile reported usage against policy.
 
 This repository contains a working proof of concept for deterministic,
 per-job model-cost enforcement. It counts a proposed OpenAI Responses API
@@ -59,19 +66,19 @@ deterministic synthetic fixtures. No external model calls produced them.
 
 See [`docs/POC_FINDINGS.md`](docs/POC_FINDINGS.md) for the adversarial verdict
 and next falsification experiment. The full product and technical design is in
-[`docs/TOKEN_GOVERNOR.md`](docs/TOKEN_GOVERNOR.md). The governed CI-repair
+[`docs/GOVERNOR.md`](docs/GOVERNOR.md). The governed CI-repair
 feature has its own design spec in [`docs/CI_REPAIR.md`](docs/CI_REPAIR.md).
 
 ## Architecture
 
-TokenGovernor is organized as four layers. A request flows top→bottom, and
-every model call — whether it originates in the CI-repair agent or the generic
-jobs API — is enforced by the same governor engine at the bottom.
+Governor is organized as four layers. A request flows top to bottom, and every
+model call, whether it originates in the CI-repair agent or the generic jobs
+API, is enforced by the same governor engine at the bottom.
 
 ```mermaid
 flowchart TD
-    FE["1. Frontend — React dashboard (src/)<br/>demo dashboard · BrandStudio · CI-Repair panel"]
-    API["2. Shared API — Express app (server/app.ts)<br/>/api/demo/* · /api/repair/runs · /v1/jobs*"]
+    FE["1. Frontend - React dashboard (src/)<br/>demo dashboard and CI-Repair panel"]
+    API["2. Shared API - Express app (server/app.ts)<br/>/api/demo/*, /api/repair/runs, /v1/jobs*"]
     REPAIR["3. Repair layer (server/repair/**)<br/>governed autonomous CI-repair agent"]
     GOV["4. Governor service<br/>GovernedJobService + governor core + runtime + openai adapter"]
 
@@ -82,8 +89,8 @@ flowchart TD
 ```
 
 1. **Frontend** (`src/`). A React dashboard: a deterministic demo walkthrough,
-   a `BrandStudio` route (`/brand`), and a CI-Repair panel that triggers repair
-   runs. It talks only to the shared API over HTTP.
+   plus a CI-Repair panel that triggers repair runs. It talks only to the shared
+   API over HTTP.
 2. **Shared API** (`server/app.ts`). An Express app that applies security
    headers, a `256kb` body limit, and a uniform JSON error envelope
    (`{ "error": { "code", "message", "details?" } }`). It exposes the demo
@@ -194,7 +201,10 @@ The endpoint returns a governed result describing the run at a high level:
 - `server/artifacts/`: bounded content-addressed artifact persistence
 - `server/demo/`: deterministic scenarios, traces, and reconciled receipts
 - `cli/`: terminal client for live governed jobs and scripted demo traces
-- `src/`: React dashboard, `BrandStudio`, and the CI-Repair panel
+- `plugins/token-governor/`: Codex launcher policy, prompt gate, and skill
+- `src/`: React operations dashboard and CI-Repair panel
+- `api/`: public Vercel entry point for deterministic demo routes
+- `public/brand/`: selected Governor identity asset
 - `tests/` and `e2e/`: unit, integration, API, and browser coverage
 - `docs/`: design and POC findings
 
@@ -209,6 +219,13 @@ CLI -> HTTP API -> jobs/runtime -> governor core
 `server/governor/**` does not import the HTTP, CLI, runtime, or provider
 adapters. `server/main.ts` is the executable API entry point;
 `server/index.ts` is an importable, side-effect-free library facade.
+
+## Production deployment
+
+The Vercel deployment exposes the dashboard and deterministic `/api/demo/*`
+walkthrough only. It forces the provider off, makes no external model calls,
+and does not present the in-memory `/v1/jobs` POC as a durable hosted service.
+Run the local service for governed-job and optional live-provider experiments.
 
 ## Run locally
 

@@ -1,4 +1,4 @@
-# TokenGovernor — Hackathon Strategy
+# Governor - Hackathon Strategy
 
 ## Judging criteria (from organizers)
 
@@ -14,7 +14,7 @@ Everything built between now and 3 PM should serve those four.
 
 ## Track fit
 
-- **Save Time. Save Money.** — primary. TokenGovernor is literally a money
+- **Save Time. Save Money.** - primary. Governor is a money
   governor for AI spend. Every demo sentence should tie back to a dollar
   amount.
 - **Best Use of OpenAI API/Codex** — submit here too. Requires the live
@@ -33,7 +33,7 @@ Everything built between now and 3 PM should serve those four.
 ## The 15-second story
 
 An AI agent gets a budget. A hard cap kills it mid-job; money spent, nothing
-delivered. TokenGovernor reserves cost before every call, intervenes when the
+delivered. Governor reserves cost before every call, intervenes when the
 job drifts, and lands the finished review under the ceiling. Same quality
 gate, fewer dollars.
 
@@ -41,4 +41,4 @@ gate, fewer dollars.
 
 Synthetic fixtures are labeled on screen. Say "deterministic scripted
 mechanism" for the walkthrough and "real measured usage" only for live runs.
-The claims guide in docs/TOKEN_GOVERNOR.md section 31 has safe wording.
+The claims guide in `docs/GOVERNOR.md` section 31 has safe wording.

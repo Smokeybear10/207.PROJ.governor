@@ -1,9 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
-import BrandStudio from "./BrandStudio";
 import RepairPanel from "./RepairPanel";
-import "./brand-studio.css";
 import "./styles.css";
 import "./repair.css";
 
@@ -14,19 +12,13 @@ if (!root) {
 }
 
 const path = window.location.pathname.replace(/\/+$/, "") || "/";
-const isBrandStudio = path === "/brand";
 const isRepair = path === "/repair";
 
-if (isBrandStudio) {
-  document.title = "Governor Brand Studio";
-} else if (isRepair) {
+if (isRepair) {
   document.title = "Governor CI-Repair";
 }
 
 function activeView(): React.JSX.Element {
-  if (isBrandStudio) {
-    return <BrandStudio />;
-  }
   if (isRepair) {
     return <RepairPanel />;
   }

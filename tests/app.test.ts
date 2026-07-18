@@ -6,8 +6,10 @@ import { createApp } from "../server/app.js";
 
 const servers: Server[] = [];
 
-async function startApp(): Promise<string> {
-  const server = createApp().listen(0, "127.0.0.1");
+async function startApp(
+  options: Parameters<typeof createApp>[0] = {}
+): Promise<string> {
+  const server = createApp(options).listen(0, "127.0.0.1");
   servers.push(server);
   await once(server, "listening");
   const address = server.address() as AddressInfo;
@@ -40,6 +42,24 @@ describe("Governor API", () => {
     });
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("x-frame-options")).toBe("DENY");
+  });
+
+  it("can limit a deployment to deterministic demo routes", async () => {
+    const baseUrl = await startApp({
+      provider: null,
+      exposeGovernedApi: false
+    });
+    const health = await fetch(`${baseUrl}/api/health`);
+    const jobs = await fetch(`${baseUrl}/v1/jobs`, { method: "POST" });
+
+    expect(await health.json()).toMatchObject({
+      providerConfigured: false,
+      governedApi: false
+    });
+    expect(jobs.status).toBe(404);
+    expect(await jobs.json()).toMatchObject({
+      error: { code: "NOT_FOUND" }
+    });
   });
 
   it("returns the strictly labeled deterministic catalog", async () => {

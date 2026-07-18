@@ -210,7 +210,7 @@ function AppHeader({
               <img src="/brand/governor-mark.svg" alt="" />
             </span>
             <span className="brand-name">Governor</span>
-            <span className="brand-context">Execution control</span>
+            <span className="brand-context">Project 207</span>
           </div>
           <nav className="app-nav" aria-label="Primary">
             <a className="app-nav__link is-active" href="/">
@@ -1658,7 +1658,7 @@ export default function App(): React.JSX.Element {
         {content}
       </main>
       <footer className="app-footer">
-        <span>Governor POC</span>
+        <span>Governor 207</span>
         <span>Pinned synthetic list-price calculations. Not billed.</span>
       </footer>
     </div>

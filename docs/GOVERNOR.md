@@ -2,7 +2,7 @@
 
 > The budget-aware execution layer for AI agents.
 
-**Status:** Adversarially revised hackathon product and technical specification  
+**Status:** Adversarially revised Ramp Hackathon product and technical specification
 **Recommended scope:** Two engineers, one application-owned AI workflow  
 **Evaluation workload:** AI pull-request review with seeded and clean cases  
 **Commercial wedge:** One high-volume workflow with machine-verifiable outcomes  

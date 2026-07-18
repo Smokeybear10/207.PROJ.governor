@@ -120,7 +120,9 @@ test("loads the default operation with explicit synthetic truth", async ({
   await mockDemoApi(page);
   await gotoDashboard(page);
 
+  await expect(page).toHaveTitle("Governor 207");
   await expect(page.getByText("Governor", { exact: true })).toBeVisible();
+  await expect(page.getByText("Project 207", { exact: true })).toBeVisible();
   await expect(
     page.getByText(
       "GOVERNOR CORE / SCRIPTED INPUTS / 0 EXTERNAL CALLS",

@@ -1649,6 +1649,12 @@ code {
     font-size: 16px;
   }
 
+  .brand-context {
+    display: block;
+    padding-left: 8px;
+    font-size: 12px;
+  }
+
   .truth-strip {
     width: 100%;
     padding-top: 8px;
