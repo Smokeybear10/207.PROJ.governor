@@ -4,6 +4,8 @@ Governor is a VS Code and Cursor extension for enforcing a dollar budget on
 multi-step AI work. It was built at the Ramp Hackathon in New York City on
 July 18, 2026.
 
+[Install Governor from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode)
+
 The extension keeps budget controls inside the editor. It creates governed
 jobs, submits prompts or selected code, shows settled and reserved spend, warns
 as a job approaches its limit, finalizes responses, and can run the governed
@@ -120,9 +122,10 @@ npm run package
 The enforcement kernel, local API, extension, CI-repair workflow, and scripted
 provider are implemented and tested. Job state is process-local and is lost
 when the service restarts. The local API is not an authenticated multi-tenant
-service. A real marketplace release still requires the Governor publisher
-credentials; CI produces an installable VSIX and performs a mock publish when
-those credentials are absent.
+service. The extension is published on the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode);
+CI produces an installable VSIX and performs a mock publish when publisher
+credentials are absent.
 
 See [docs/GOVERNOR.md](docs/GOVERNOR.md) for the technical design,
 [docs/CI_REPAIR.md](docs/CI_REPAIR.md) for the repair workflow, and

@@ -1,5 +1,7 @@
 # Governor 207 for VS Code
 
+[Install Governor from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode)
+
 Budget control for AI jobs inside the editor. The extension talks to the
 Governor API (`/v1/jobs`) and shows spend, reservations, and risk live
 while work runs through the governor.

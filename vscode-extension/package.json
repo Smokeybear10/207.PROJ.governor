@@ -12,6 +12,7 @@
     "url": "https://github.com/Smokeybear10/207.PROJ.governor.git",
     "directory": "vscode-extension"
   },
+  "homepage": "https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode",
   "engines": {
     "vscode": "^1.85.0"
   },
