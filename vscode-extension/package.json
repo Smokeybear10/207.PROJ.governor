@@ -34,7 +34,7 @@
       {
         "command": "tokenGovernor.openJobPanel",
         "category": "Governor",
-        "title": "Open Job Panel"
+        "title": "Open Job View"
       },
       {
         "command": "tokenGovernor.submitSelection",
@@ -47,6 +47,24 @@
         "title": "Finalize Pending Response"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tokenGovernor",
+          "title": "Governor",
+          "icon": "media/governor.svg"
+        }
+      ]
+    },
+    "views": {
+      "tokenGovernor": [
+        {
+          "type": "webview",
+          "id": "tokenGovernor.jobView",
+          "name": "Active Job"
+        }
+      ]
+    },
     "configuration": {
       "title": "TokenGovernor",
       "properties": {

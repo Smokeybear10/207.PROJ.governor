@@ -9,14 +9,16 @@ while work runs through the governor.
 - **Status bar**: committed spend / budget for the active job, colored by the
   same risk thresholds the governor core uses (WATCH at 70% committed,
   AT_RISK at 90%).
-- **Job panel**: budget bar (settled + reserved), accounting breakdown, and
-  every submitted request with its phase and status, so you can see which
-  steps to look into.
+- **Sidebar view**: a Governor icon in the Activity Bar opens a vertical
+  job view — committed spend hero number, budget bar (settled + reserved),
+  accounting breakdown, and every submitted request with its phase and
+  status, so you can see which steps to look into. Sits alongside the file
+  explorer like Copilot does; works in VS Code and Cursor.
 - **Commands** (Cmd+Shift+P, category "Governor"):
   - Health Check
   - Create Job (prompts for a USD budget, e.g. `0.075`)
   - Set Active Job
-  - Open Job Panel
+  - Open Job View
   - Submit Selection Through Governor (sends the editor selection as the
     model input for a `work` or `final` response)
   - Finalize Pending Response (accept/reject a settled final output)
@@ -40,9 +42,10 @@ while work runs through the governor.
    ```
 
 3. Press F5 to launch the Extension Development Host.
-4. In the dev host: "Governor: Create Job" → budget `0.075` → open the job
-   panel, select some text in any file, then "Governor: Submit Selection
-   Through Governor". Watch the status bar and panel update as the governor
+4. In the dev host: "Governor: Create Job" → budget `0.075` → click the
+   Governor icon in the Activity Bar (or run "Governor: Open Job View"),
+   select some text in any file, then "Governor: Submit Selection Through
+   Governor". Watch the status bar and the sidebar update as the governor
    reserves, settles, and (when over budget) refuses requests.
 
 ## Settings

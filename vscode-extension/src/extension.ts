@@ -155,7 +155,81 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function panelHtml(job: JobView): string {
+const VIEW_STYLES = `
+  body {
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+  .kicker {
+    color: var(--vscode-descriptionForeground);
+    font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; margin: 0 0 4px;
+  }
+  h2 { margin: 0; font-size: 13px; word-break: break-all; }
+  .sub { color: var(--vscode-descriptionForeground); font-size: 11px; margin: 4px 0 0; }
+  .band {
+    display: inline-block; margin: 8px 0 0; padding: 1px 8px;
+    border: 1px solid; border-radius: 999px;
+    font-size: 10px; font-weight: 700;
+  }
+  .hero {
+    margin: 12px 0 2px;
+    font-size: 19px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .hero small { font-size: 11px; font-weight: 500; color: var(--vscode-descriptionForeground); }
+  .bar {
+    display: flex; height: 12px; border-radius: 4px; overflow: hidden;
+    background: var(--vscode-editorWidget-background);
+    border: 1px solid var(--vscode-editorWidget-border, transparent);
+    margin: 6px 0 12px;
+  }
+  .bar .settled { background: var(--vscode-charts-green); }
+  .bar .reserved { background: var(--vscode-charts-yellow); }
+  dl {
+    display: grid; grid-template-columns: 1fr max-content;
+    gap: 4px 10px; font-size: 12px; margin: 0 0 14px;
+  }
+  dt { color: var(--vscode-descriptionForeground); }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; word-break: break-all; }
+  h3 {
+    margin: 0 0 6px; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--vscode-descriptionForeground);
+  }
+  .request {
+    padding: 6px 0;
+    border-top: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.25));
+  }
+  .request-head { display: flex; align-items: center; gap: 6px; }
+  .request-head .phase { color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .request-head .chip { margin-left: auto; }
+  .request code { display: block; margin-top: 3px; font-size: 11px; word-break: break-all; }
+  .chip {
+    padding: 0 7px; border: 1px solid; border-radius: 999px;
+    font-size: 10px; white-space: nowrap;
+  }
+  .empty { color: var(--vscode-descriptionForeground); font-size: 12px; }
+  code { font-family: var(--vscode-editor-font-family); }
+`;
+
+function viewDocument(body: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><style>${VIEW_STYLES}</style></head>
+<body>${body}</body>
+</html>`;
+}
+
+function emptyViewHtml(message: string): string {
+  return viewDocument(
+    `<p class="kicker">TokenGovernor</p><p class="empty">${escapeHtml(message)}</p>`
+  );
+}
+
+function jobViewHtml(job: JobView): string {
   const band = riskBand(job);
   const budget = Math.max(1, job.policy.budget_micro_usd);
   const pct = (micro: number): string =>
@@ -176,81 +250,71 @@ function panelHtml(job: JobView): string {
           : tone === "warn"
             ? "var(--vscode-charts-yellow)"
             : "var(--vscode-charts-green)";
-      return `<tr>
-        <td>${request.sequence}</td>
-        <td><code>${escapeHtml(request.request_id)}</code></td>
-        <td>${escapeHtml(request.phase)}</td>
-        <td><span class="chip" style="border-color:${toneColor};color:${toneColor}">${escapeHtml(request.status)}</span></td>
-      </tr>`;
+      return `<div class="request">
+        <div class="request-head">
+          <strong>#${request.sequence}</strong>
+          <span class="phase">${escapeHtml(request.phase)}</span>
+          <span class="chip" style="border-color:${toneColor};color:${toneColor}">${escapeHtml(request.status)}</span>
+        </div>
+        <code>${escapeHtml(request.request_id)}</code>
+      </div>`;
     })
     .join("");
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<style>
-  body {
-    font-family: var(--vscode-font-family);
-    color: var(--vscode-foreground);
-    padding: 14px 18px;
-  }
-  h2 { margin: 0 0 2px; font-size: 15px; }
-  .sub { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 14px; }
-  .band {
-    display: inline-block; margin-left: 8px; padding: 1px 8px;
-    border: 1px solid ${bandColor}; border-radius: 999px;
-    color: ${bandColor}; font-size: 11px; font-weight: 600;
-  }
-  .bar {
-    display: flex; height: 14px; border-radius: 4px; overflow: hidden;
-    background: var(--vscode-editorWidget-background);
-    border: 1px solid var(--vscode-editorWidget-border, transparent);
-    margin: 6px 0 4px;
-  }
-  .bar .settled { background: var(--vscode-charts-green); width: ${pct(job.accounting.settled_micro_usd)}; }
-  .bar .reserved { background: var(--vscode-charts-yellow); width: ${pct(job.accounting.reserved_micro_usd)}; }
-  .legend { color: var(--vscode-descriptionForeground); font-size: 11px; margin-bottom: 14px; }
-  table { border-collapse: collapse; width: 100%; font-size: 12px; }
-  th, td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.25)); }
-  th { color: var(--vscode-descriptionForeground); font-weight: 600; }
-  dl { display: grid; grid-template-columns: max-content auto; gap: 3px 14px; font-size: 12px; margin: 0 0 16px; }
-  dt { color: var(--vscode-descriptionForeground); }
-  dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .chip { padding: 0 7px; border: 1px solid; border-radius: 999px; font-size: 11px; }
-  code { font-family: var(--vscode-editor-font-family); }
-</style>
-</head>
-<body>
-  <h2>Job <code>${escapeHtml(job.id)}</code><span class="band">${band.replace("_", " ")}</span></h2>
-  <p class="sub">status: ${escapeHtml(job.status)} · responses started: ${job.accounting.responses_started}/${job.policy.max_responses}</p>
+  return viewDocument(`
+  <p class="kicker">Active governed job</p>
+  <h2><code>${escapeHtml(job.id)}</code></h2>
+  <p class="sub">status: ${escapeHtml(job.status)} · responses ${job.accounting.responses_started}/${job.policy.max_responses}</p>
+  <span class="band" style="border-color:${bandColor};color:${bandColor}">${band.replace("_", " ")}</span>
 
+  <p class="hero">${usd(job.accounting.committed_usd)} <small>of ${usd(job.policy.budget_usd)} committed</small></p>
   <div class="bar" title="settled + reserved against the budget">
-    <span class="settled"></span><span class="reserved"></span>
+    <span class="settled" style="width:${pct(job.accounting.settled_micro_usd)}"></span>
+    <span class="reserved" style="width:${pct(job.accounting.reserved_micro_usd)}"></span>
   </div>
-  <p class="legend">
-    settled ${usd(job.accounting.settled_usd)} ·
-    reserved ${usd(job.accounting.reserved_usd)} ·
-    available for work ${usd(job.accounting.available_for_work_usd)} ·
-    budget ${usd(job.policy.budget_usd)}
-  </p>
 
   <dl>
-    <dt>Budget</dt><dd>${usd(job.policy.budget_usd)}</dd>
     <dt>Settled</dt><dd>${usd(job.accounting.settled_usd)}</dd>
     <dt>Reserved</dt><dd>${usd(job.accounting.reserved_usd)}</dd>
-    <dt>Committed</dt><dd>${usd(job.accounting.committed_usd)}</dd>
     <dt>Uncommitted</dt><dd>${usd(job.accounting.uncommitted_usd)}</dd>
+    <dt>Available for work</dt><dd>${usd(job.accounting.available_for_work_usd)}</dd>
     <dt>Protected final reserve</dt><dd>${usd(job.policy.final_reserve_usd)}</dd>
     <dt>Pending validation</dt><dd>${escapeHtml(job.pending_final_validation_request_id ?? "none")}</dd>
   </dl>
 
-  <table>
-    <thead><tr><th>#</th><th>Request</th><th>Phase</th><th>Status</th></tr></thead>
-    <tbody>${requestRows || `<tr><td colspan="4">No responses submitted yet.</td></tr>`}</tbody>
-  </table>
-</body>
-</html>`;
+  <h3>Requests</h3>
+  ${requestRows || `<p class="empty">No responses submitted yet.</p>`}
+  `);
+}
+
+class JobViewProvider implements vscode.WebviewViewProvider {
+  static readonly viewId = "tokenGovernor.jobView";
+
+  #view: vscode.WebviewView | undefined;
+  #html = emptyViewHtml(
+    "No active governed job. Run “Governor: Create Job” to start one."
+  );
+
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.#view = view;
+    view.webview.options = { enableScripts: false };
+    view.webview.html = this.#html;
+    view.onDidDispose(() => {
+      if (this.#view === view) {
+        this.#view = undefined;
+      }
+    });
+  }
+
+  setHtml(html: string): void {
+    if (html === this.#html) {
+      return;
+    }
+    this.#html = html;
+    if (this.#view) {
+      this.#view.webview.html = html;
+    }
+  }
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -262,8 +326,13 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBar.command = "tokenGovernor.openJobPanel";
   context.subscriptions.push(output, statusBar);
 
-  let panel: vscode.WebviewPanel | undefined;
-  let lastPanelHtml = "";
+  const jobViewProvider = new JobViewProvider();
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      JobViewProvider.viewId,
+      jobViewProvider
+    )
+  );
   let pollTimer: ReturnType<typeof setInterval> | undefined;
 
   const activeJobId = (): string | undefined =>
@@ -299,20 +368,18 @@ export function activate(context: vscode.ExtensionContext): void {
           ? new vscode.ThemeColor("statusBarItem.warningBackground")
           : undefined;
     statusBar.show();
-
-    if (panel) {
-      const html = panelHtml(job);
-      if (html !== lastPanelHtml) {
-        panel.webview.html = html;
-        lastPanelHtml = html;
-      }
-    }
+    jobViewProvider.setHtml(jobViewHtml(job));
   };
 
   const refresh = async (): Promise<void> => {
     const jobId = activeJobId();
     if (!jobId) {
       statusBar.hide();
+      jobViewProvider.setHtml(
+        emptyViewHtml(
+          "No active governed job. Run “Governor: Create Job” to start one."
+        )
+      );
       return;
     }
     try {
@@ -321,13 +388,15 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       renderJob(job);
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Governor request failed.";
       statusBar.text = "$(shield) Governor: unreachable";
       statusBar.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.errorBackground"
       );
-      statusBar.tooltip =
-        error instanceof Error ? error.message : "Governor request failed.";
+      statusBar.tooltip = message;
       statusBar.show();
+      jobViewProvider.setHtml(emptyViewHtml(message));
     }
   };
 
@@ -434,26 +503,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("tokenGovernor.openJobPanel", async () => {
-      if (!activeJobId()) {
-        void vscode.window.showWarningMessage(
-          "No active governor job. Run “Governor: Create Job” first."
-        );
-        return;
-      }
-      if (panel) {
-        panel.reveal();
-      } else {
-        panel = vscode.window.createWebviewPanel(
-          "tokenGovernorJob",
-          "Governor Job",
-          vscode.ViewColumn.Beside,
-          { enableScripts: false }
-        );
-        panel.onDidDispose(() => {
-          panel = undefined;
-          lastPanelHtml = "";
-        });
-      }
+      await vscode.commands.executeCommand(
+        `${JobViewProvider.viewId}.focus`
+      );
       await refresh();
     })
   );
