@@ -11,6 +11,8 @@
     "dev:api": "tsx watch server/main.ts",
     "dev:web": "vite --host 127.0.0.1",
     "governor": "tsx cli/token-governor.ts",
+    "station:rehearsal": "tsx station/rehearsal-server.ts",
+    "station:demo": "bash station/run-demo.sh",
     "start": "tsx server/main.ts",
     "build": "tsc --noEmit && vite build",
     "lint": "tsc --noEmit",

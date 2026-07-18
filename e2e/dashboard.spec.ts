@@ -127,7 +127,9 @@ test("loads the default operation with explicit synthetic truth", async ({
       { exact: true }
     )
   ).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Execution control" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "AI agents that finish under budget" })
+  ).toBeVisible();
   await expect(page.getByLabel("Scenario")).toHaveValue(
     "large-failing-log"
   );
@@ -138,6 +140,11 @@ test("loads the default operation with explicit synthetic truth", async ({
   await expect(
     page.getByRole("button", { name: "Play scripted trace" })
   ).toBeEnabled();
+  await page
+    .getByText(
+      "Deterministic demo: synthetic usage, pinned list prices, not billed"
+    )
+    .click();
   await expect(
     page.getByText("SYNTHETIC_DETERMINISTIC_FIXTURE", { exact: true })
   ).toBeVisible();
