@@ -161,6 +161,76 @@ export type CreateDemoRunInput = {
   controller: Controller;
 };
 
+export type RepairMode = "fake" | "hybrid" | "live";
+
+export type RepairStatus = "repaired" | "not_repaired";
+
+export type RepairEvaluation = {
+  passed: boolean;
+  targetPassed: boolean;
+  policyRespected: boolean;
+  exitCode: number;
+  violations: string[];
+};
+
+export type RepairResponseEvent = {
+  kind: "response";
+  sequence: number;
+  phase: "work" | "final";
+  requestId: string;
+  status: string;
+  responseId?: string;
+};
+
+export type RepairToolEvent = {
+  kind: "tool";
+  sequence: number;
+  callId: string;
+  name: string;
+  revision: string;
+  outputBytes: number;
+};
+
+export type RepairRetryEvent = {
+  kind: "retry";
+  sequence: number;
+  callId: string;
+  name: string;
+  state: string;
+  equivalentRetryCount: number;
+  allowed: false;
+};
+
+export type RepairTraceEvent =
+  | RepairResponseEvent
+  | RepairToolEvent
+  | RepairRetryEvent;
+
+export type RepairResult = {
+  status: RepairStatus;
+  reason?: string;
+  finalText: string | null;
+  evaluation: RepairEvaluation | null;
+  toolCalls: number;
+  revision: string;
+  settledMicroUsd?: number;
+  trace: RepairTraceEvent[];
+};
+
+export type RepairRunResponse = {
+  fixtureId: string;
+  mode: RepairMode;
+  model: string;
+  rateCardVersion: string;
+  policy: Record<string, unknown>;
+  result: RepairResult;
+};
+
+export type CreateRepairRunInput = {
+  fixtureId?: string;
+  mode?: RepairMode;
+};
+
 type DetailedScenario = {
   id: string;
   title: string;
@@ -930,4 +1000,138 @@ export async function createDemoRun(
   }
 
   return validateRunTrace(await response.json(), input);
+}
+
+function isRepairMode(value: unknown): value is RepairMode {
+  return value === "fake" || value === "hybrid" || value === "live";
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function validateRepairEvaluation(value: unknown): RepairEvaluation | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!isRecord(value)) {
+    throw new ApiError("Repair evaluation did not match the repair contract.");
+  }
+
+  const violations = Array.isArray(value.violations)
+    ? value.violations.filter(
+        (entry): entry is string => typeof entry === "string"
+      )
+    : [];
+
+  return {
+    passed: value.passed === true,
+    targetPassed: value.targetPassed === true,
+    policyRespected: value.policyRespected === true,
+    exitCode: optionalNumber(value.exitCode) ?? 0,
+    violations
+  };
+}
+
+function validateRepairTraceEvent(value: unknown): RepairTraceEvent {
+  if (!isRecord(value)) {
+    throw new ApiError("Repair trace contained an invalid event.");
+  }
+
+  const sequence = optionalNumber(value.sequence) ?? 0;
+
+  if (value.kind === "tool") {
+    return {
+      kind: "tool",
+      sequence,
+      callId: optionalString(value.callId) ?? "",
+      name: optionalString(value.name) ?? "tool",
+      revision: optionalString(value.revision) ?? "",
+      outputBytes: optionalNumber(value.outputBytes) ?? 0
+    };
+  }
+
+  if (value.kind === "retry") {
+    return {
+      kind: "retry",
+      sequence,
+      callId: optionalString(value.callId) ?? "",
+      name: optionalString(value.name) ?? "tool",
+      state: optionalString(value.state) ?? "",
+      equivalentRetryCount: optionalNumber(value.equivalentRetryCount) ?? 0,
+      allowed: false
+    };
+  }
+
+  if (value.kind === "response") {
+    return {
+      kind: "response",
+      sequence,
+      phase: value.phase === "final" ? "final" : "work",
+      requestId: optionalString(value.requestId) ?? "",
+      status: optionalString(value.status) ?? "",
+      responseId: optionalString(value.responseId)
+    };
+  }
+
+  throw new ApiError("Repair trace contained an unsupported event kind.");
+}
+
+function validateRepairRun(value: unknown): RepairRunResponse {
+  if (!isRecord(value) || !isRecord(value.result)) {
+    throw new ApiError(
+      "Repair response did not match the agreed repair run contract."
+    );
+  }
+
+  const result = value.result;
+  if (result.status !== "repaired" && result.status !== "not_repaired") {
+    throw new ApiError("Repair response contained an invalid result status.");
+  }
+  if (!Array.isArray(result.trace)) {
+    throw new ApiError("Repair response did not include a governed trace.");
+  }
+
+  return {
+    fixtureId: optionalString(value.fixtureId) ?? "",
+    mode: isRepairMode(value.mode) ? value.mode : "fake",
+    model: optionalString(value.model) ?? "",
+    rateCardVersion: optionalString(value.rateCardVersion) ?? "",
+    policy: isRecord(value.policy) ? value.policy : {},
+    result: {
+      status: result.status,
+      reason: optionalString(result.reason),
+      finalText: typeof result.finalText === "string" ? result.finalText : null,
+      evaluation: validateRepairEvaluation(result.evaluation),
+      toolCalls: optionalNumber(result.toolCalls) ?? 0,
+      revision: optionalString(result.revision) ?? "",
+      settledMicroUsd: optionalNumber(result.settledMicroUsd),
+      trace: result.trace.map(validateRepairTraceEvent)
+    }
+  };
+}
+
+export async function createRepairRun(
+  input: CreateRepairRunInput,
+  signal?: AbortSignal
+): Promise<RepairRunResponse> {
+  const response = await fetch("/api/repair/runs", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(input),
+    signal: withTimeout(signal)
+  });
+
+  if (!response.ok) {
+    throw await readError(response);
+  }
+
+  return validateRepairRun(await response.json());
 }

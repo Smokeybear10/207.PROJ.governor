@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  GPT_5_NANO_STANDARD_RATE_CARD,
-  ReservationLedger,
-  type GovernorPolicy
-} from "../server/governor/index.js";
+import { GovernedJobService } from "../server/jobs/index.js";
 import { ScriptedResponsesProvider } from "../server/openai/scripted-provider.js";
 import {
   createRepairSandbox,
@@ -12,16 +8,6 @@ import {
   type RepairSandbox
 } from "../server/repair/index.js";
 import { brokenSumRepairScripts } from "../server/repair/demo-script.js";
-
-const POLICY: GovernorPolicy = {
-  applicationCeilingMicroUsd: 2_000_000,
-  finalAnswerReserveMicroUsd: 100_000,
-  finalAnswerInputTokenLimit: 5_000,
-  minimumFinalOutputTokens: 100,
-  maxResponses: 6,
-  maxEquivalentRetries: 1,
-  rateCardVersion: GPT_5_NANO_STANDARD_RATE_CARD.version
-};
 
 let activeSandbox: RepairSandbox | null = null;
 
@@ -34,8 +20,8 @@ afterEach(async () => {
 
 describe("governed CI-repair workflow", () => {
   it("repairs the broken-sum fixture under budget governance", async () => {
-    const ledger = new ReservationLedger(POLICY, GPT_5_NANO_STANDARD_RATE_CARD);
     const provider = new ScriptedResponsesProvider(brokenSumRepairScripts());
+    const service = new GovernedJobService({ provider });
     const fixture = getRepairFixture("broken-sum");
     const sandbox = await createRepairSandbox(fixture);
     activeSandbox = sandbox;
@@ -45,13 +31,14 @@ describe("governed CI-repair workflow", () => {
     expect(before.exitCode).not.toBe(0);
 
     const result = await runGovernedRepair({
-      jobId: "repair-test",
-      ledger,
-      rateCard: GPT_5_NANO_STANDARD_RATE_CARD,
-      provider,
+      service,
+      jobId: "broken-sum",
       sandbox,
       fixture,
-      model: GPT_5_NANO_STANDARD_RATE_CARD.model
+      budgetUsd: "1.00",
+      maxResponses: 6,
+      finalInputTokenLimit: 4_096,
+      minimumFinalOutputTokens: 100
     });
 
     expect(result.status).toBe("repaired");
@@ -59,16 +46,13 @@ describe("governed CI-repair workflow", () => {
       expect(result.evaluation.passed).toBe(true);
       expect(result.evaluation.exitCode).toBe(0);
       expect(result.finalText.length).toBeGreaterThan(0);
+      // Governed spend was actually charged and stayed inside the ceiling.
+      expect(result.settledMicroUsd).toBeGreaterThan(0);
+      expect(result.settledMicroUsd).toBeLessThanOrEqual(
+        result.accounting.applicationCeilingMicroUsd
+      );
     }
     provider.assertComplete();
-
-    // Governed spend stayed strictly inside the ceiling and was actually charged.
-    const snapshot = ledger.getSnapshot();
-    expect(snapshot.settledMicroUsd).toBeGreaterThan(0);
-    expect(snapshot.settledMicroUsd).toBeLessThanOrEqual(
-      POLICY.applicationCeilingMicroUsd
-    );
-    expect(snapshot.completionAccepted).toBe(true);
 
     // The fix is real: the patched source now passes tests.
     const after = await sandbox.runTests();
@@ -77,38 +61,30 @@ describe("governed CI-repair workflow", () => {
   });
 
   it("stops cleanly and does not report a repair when the budget is exhausted", async () => {
-    const tightPolicy: GovernorPolicy = {
-      ...POLICY,
-      // Reserve consumes almost the whole ceiling, leaving too little work
-      // budget to admit even a minimum-length work response -> first turn denied.
-      applicationCeilingMicroUsd: 1_050,
-      finalAnswerReserveMicroUsd: 1_000,
-      finalAnswerInputTokenLimit: 1_000,
-      minimumFinalOutputTokens: 100
-    };
-    const ledger = new ReservationLedger(
-      tightPolicy,
-      GPT_5_NANO_STANDARD_RATE_CARD
-    );
     const provider = new ScriptedResponsesProvider(brokenSumRepairScripts());
+    const service = new GovernedJobService({ provider });
     const fixture = getRepairFixture("broken-sum");
     const sandbox = await createRepairSandbox(fixture);
     activeSandbox = sandbox;
 
+    // A tiny work budget: the final reserve consumes almost the whole ceiling,
+    // leaving too little to admit even the first work response -> GOVERNOR_DENIED.
     const result = await runGovernedRepair({
-      jobId: "repair-budget",
-      ledger,
-      rateCard: GPT_5_NANO_STANDARD_RATE_CARD,
-      provider,
+      service,
       sandbox,
       fixture,
-      model: GPT_5_NANO_STANDARD_RATE_CARD.model
+      budgetUsd: "0.0001",
+      maxResponses: 6,
+      finalInputTokenLimit: 100,
+      minimumFinalOutputTokens: 1
     });
 
     expect(result.status).toBe("not_repaired");
-    const snapshot = ledger.getSnapshot();
-    expect(snapshot.settledMicroUsd).toBeLessThanOrEqual(
-      tightPolicy.applicationCeilingMicroUsd
-    );
+    if (result.status === "not_repaired") {
+      expect(result.reason).toBe("WORK_DENIED");
+      expect(result.settledMicroUsd).toBeLessThanOrEqual(
+        result.accounting.applicationCeilingMicroUsd
+      );
+    }
   });
 });

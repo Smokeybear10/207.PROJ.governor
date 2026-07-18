@@ -1,0 +1,112 @@
+{
+  "name": "token-governor-vscode",
+  "displayName": "Governor",
+  "description": "Budget control for AI jobs inside the editor: watch spend, reservations, and risk live, and run governed CI-repair — all capped by the Governor.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "governor",
+  "icon": "media/icon.png",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "tokenGovernor.healthCheck",
+        "category": "Governor",
+        "title": "Health Check"
+      },
+      {
+        "command": "tokenGovernor.createJob",
+        "category": "Governor",
+        "title": "Create Job"
+      },
+      {
+        "command": "tokenGovernor.setActiveJob",
+        "category": "Governor",
+        "title": "Set Active Job"
+      },
+      {
+        "command": "tokenGovernor.openJobPanel",
+        "category": "Governor",
+        "title": "Open Job View"
+      },
+      {
+        "command": "tokenGovernor.submitSelection",
+        "category": "Governor",
+        "title": "Submit Selection Through Governor"
+      },
+      {
+        "command": "tokenGovernor.finalize",
+        "category": "Governor",
+        "title": "Finalize Pending Response"
+      },
+      {
+        "command": "tokenGovernor.runRepair",
+        "category": "Governor",
+        "title": "Run Governed CI-Repair"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tokenGovernor",
+          "title": "Governor",
+          "icon": "media/governor.svg"
+        }
+      ]
+    },
+    "views": {
+      "tokenGovernor": [
+        {
+          "type": "webview",
+          "id": "tokenGovernor.jobView",
+          "name": "Active Job"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "TokenGovernor",
+      "properties": {
+        "tokenGovernor.apiBaseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8787",
+          "description": "Base URL of the TokenGovernor API server."
+        },
+        "tokenGovernor.pollIntervalMs": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 500,
+          "description": "How often to refresh the active job, in milliseconds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:vscode": "npm run compile && node ./out/test/runTest.js",
+    "build": "tsc -p .",
+    "package": "vsce package --no-dependencies -o token-governor-vscode.vsix",
+    "publish:mock": "node scripts/mock-publish.mjs"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.19.9",
+    "@types/vscode": "1.85.0",
+    "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "^3.9.2",
+    "glob": "^13.0.6",
+    "mocha": "^11.7.6",
+    "typescript": "5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

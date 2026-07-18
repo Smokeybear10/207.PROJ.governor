@@ -1,9 +1,9 @@
 import { MemoryArtifactStore } from "../artifacts/index.js";
 import {
-  GPT_5_NANO_STANDARD_RATE_CARD,
-  ReservationLedger,
+  GPT_5_4_MINI_STANDARD_RATE_CARD,
   type GovernorPolicy
 } from "../governor/index.js";
+import { GovernedJobService } from "../jobs/index.js";
 import {
   createResponsesProvider,
   resolveProviderMode,
@@ -18,15 +18,11 @@ import {
   type GovernedRepairResult
 } from "./workflow.js";
 
-const DEMO_POLICY: GovernorPolicy = {
-  applicationCeilingMicroUsd: 2_000_000,
-  finalAnswerReserveMicroUsd: 100_000,
-  finalAnswerInputTokenLimit: 5_000,
-  minimumFinalOutputTokens: 100,
-  maxResponses: 6,
-  maxEquivalentRetries: 1,
-  rateCardVersion: GPT_5_NANO_STANDARD_RATE_CARD.version
-};
+/** Job-policy knobs for the demo repair run (priced against the pinned card). */
+const DEMO_BUDGET_USD = "2.00";
+const DEMO_MAX_RESPONSES = 6;
+const DEMO_FINAL_INPUT_TOKEN_LIMIT = 5_000;
+const DEMO_MINIMUM_FINAL_OUTPUT_TOKENS = 100;
 
 /** Deterministic scripted agent per fixture (used in fake/hybrid modes). */
 function scriptedProviderFor(fixtureId: string): ScriptedResponsesProvider {
@@ -59,31 +55,40 @@ export async function runRepairDemo(
   const mode =
     options.mode ?? resolveProviderMode(process.env.GOVERNOR_PROVIDER_MODE);
   const fixture = getRepairFixture(fixtureId);
-  const rateCard = GPT_5_NANO_STANDARD_RATE_CARD;
-  const ledger = new ReservationLedger(DEMO_POLICY, rateCard);
   const scripted =
     mode === "live" ? undefined : scriptedProviderFor(fixtureId);
   const provider = createResponsesProvider({ mode, scripted });
+  const service = new GovernedJobService({ provider });
   const sandbox = await createRepairSandbox(fixture);
   const jobId = `repair-${fixtureId}-${Date.now()}`;
 
   try {
     const result = await runGovernedRepair({
-      jobId,
-      ledger,
-      rateCard,
-      provider,
+      service,
       sandbox,
       fixture,
       artifactStore: new MemoryArtifactStore(),
-      model: rateCard.model
+      jobId,
+      budgetUsd: DEMO_BUDGET_USD,
+      maxResponses: DEMO_MAX_RESPONSES,
+      finalInputTokenLimit: DEMO_FINAL_INPUT_TOKEN_LIMIT,
+      minimumFinalOutputTokens: DEMO_MINIMUM_FINAL_OUTPUT_TOKENS
     });
+    const policy: GovernorPolicy = {
+      applicationCeilingMicroUsd: result.accounting.applicationCeilingMicroUsd,
+      finalAnswerReserveMicroUsd: result.accounting.finalAnswerReserveMicroUsd,
+      finalAnswerInputTokenLimit: result.accounting.finalAnswerInputTokenLimit,
+      minimumFinalOutputTokens: result.accounting.minimumFinalOutputTokens,
+      maxResponses: result.accounting.maxResponses,
+      maxEquivalentRetries: 0,
+      rateCardVersion: GPT_5_4_MINI_STANDARD_RATE_CARD.version
+    };
     return {
       fixtureId,
       mode,
-      model: rateCard.model,
-      rateCardVersion: rateCard.version,
-      policy: DEMO_POLICY,
+      model: GPT_5_4_MINI_STANDARD_RATE_CARD.model,
+      rateCardVersion: GPT_5_4_MINI_STANDARD_RATE_CARD.version,
+      policy,
       result
     };
   } finally {

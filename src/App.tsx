@@ -202,12 +202,22 @@ function AppHeader({
   return (
     <header className="app-header">
       <div className="header-inner">
-        <div className="brand-lockup" aria-label="Governor">
-          <span className="brand-mark" aria-hidden="true">
-            <img src="/brand/governor-mark.svg" alt="" />
-          </span>
-          <span className="brand-name">Governor</span>
-          <span className="brand-context">Execution control</span>
+        <div className="header-left">
+          <div className="brand-lockup" aria-label="Governor">
+            <span className="brand-mark" aria-hidden="true">
+              <img src="/brand/governor-mark.svg" alt="" />
+            </span>
+            <span className="brand-name">Governor</span>
+            <span className="brand-context">Execution control</span>
+          </div>
+          <nav className="app-nav" aria-label="Primary">
+            <a className="app-nav__link is-active" href="/">
+              Dashboard
+            </a>
+            <a className="app-nav__link" href="/repair">
+              CI-Repair
+            </a>
+          </nav>
         </div>
         <div className="truth-strip" aria-label="Data provenance and run state">
           <span className="truth-badge">

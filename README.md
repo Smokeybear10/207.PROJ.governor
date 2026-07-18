@@ -59,7 +59,108 @@ deterministic synthetic fixtures. No external model calls produced them.
 
 See [`docs/POC_FINDINGS.md`](docs/POC_FINDINGS.md) for the adversarial verdict
 and next falsification experiment. The full product and technical design is in
-[`docs/TOKEN_GOVERNOR.md`](docs/TOKEN_GOVERNOR.md).
+[`docs/TOKEN_GOVERNOR.md`](docs/TOKEN_GOVERNOR.md). The governed CI-repair
+feature has its own design spec in [`docs/CI_REPAIR.md`](docs/CI_REPAIR.md).
+
+## Architecture
+
+TokenGovernor is organized as four layers. A request flows top→bottom, and
+every model call — whether it originates in the CI-repair agent or the generic
+jobs API — is enforced by the same governor engine at the bottom.
+
+```mermaid
+flowchart TD
+    FE["1. Frontend — React dashboard (src/)<br/>demo dashboard · BrandStudio · CI-Repair panel"]
+    API["2. Shared API — Express app (server/app.ts)<br/>/api/demo/* · /api/repair/runs · /v1/jobs*"]
+    REPAIR["3. Repair layer (server/repair/**)<br/>governed autonomous CI-repair agent"]
+    GOV["4. Governor service<br/>GovernedJobService + governor core + runtime + openai adapter"]
+
+    FE --> API
+    API --> REPAIR
+    API --> GOV
+    REPAIR --> GOV
+```
+
+1. **Frontend** (`src/`). A React dashboard: a deterministic demo walkthrough,
+   a `BrandStudio` route (`/brand`), and a CI-Repair panel that triggers repair
+   runs. It talks only to the shared API over HTTP.
+2. **Shared API** (`server/app.ts`). An Express app that applies security
+   headers, a `256kb` body limit, and a uniform JSON error envelope
+   (`{ "error": { "code", "message", "details?" } }`). It exposes the demo
+   routes (`/api/demo/*`), the CI-repair entrypoint (`/api/repair/runs`), and
+   the governor's versioned job routes (`/v1/jobs*`).
+3. **Repair layer / "our layer"** (`server/repair/**`). A governed autonomous
+   CI-repair agent. It copies a broken fixture into an isolated sandbox, reads
+   test evidence, proposes patches through custom tools, re-runs tests, and is
+   bounded by a per-job spend budget. It never enforces cost itself; it drives
+   the governor engine for every model call.
+4. **Governor service** (`server/jobs/service.ts` `GovernedJobService` +
+   `server/governor/**` core + `server/runtime/**` + `server/openai/**`). The
+   deterministic budget-enforcement engine. It pre-authorizes each request's
+   worst-case list-price cost against a fixed ceiling before dispatch and
+   reconciles actual provider usage afterward. It is exposed over HTTP as
+   `/v1/jobs`, and its governed-execution path is what the repair layer calls
+   per model call.
+
+### Cost enforcement flow
+
+Inside the governor, every model request passes through the same deterministic
+pipeline before and after dispatch:
+
+```text
+COUNT input tokens   -> exact proposed-input preflight
+PRICE worst case     -> conservative list-price ceiling for the request
+RESERVE              -> hold that amount atomically against the job ceiling
+CAP output           -> max_output_tokens sized to the safe remainder
+DISPATCH             -> one in-flight response, no automatic retries
+SETTLE               -> reconcile provider-reported usage; release the remainder
+```
+
+A request is never dispatched before its worst-case cost is reserved, and
+settled cost plus outstanding reservations can never exceed the job ceiling.
+
+## CI-Repair
+
+The CI-Repair feature turns TokenGovernor from a read-only PR-review demo into a
+governed autonomous build-repair agent. Given a broken fixture repository, the
+agent inspects files, reads failing-test output, applies minimal patches, and
+re-runs tests in a loop until the build is green — while the governor reserves,
+caps, and settles the cost of every model call and refuses any call that would
+exceed the per-job budget. CI-repair is the wedge argued for in
+[`docs/POC_FINDINGS.md`](docs/POC_FINDINGS.md): a machine-verifiable outcome
+(tests pass/fail) with repeated attempts, where reserve/cap/settle and
+retry-suppression earn their value.
+
+### Triggering a run
+
+Send a `POST /api/repair/runs` request. The body selects a fixture and a
+provider mode:
+
+```bash
+curl -sS http://127.0.0.1:8787/api/repair/runs \
+  -H 'Content-Type: application/json' \
+  -d '{ "fixtureId": "broken-sum", "mode": "fake" }'
+```
+
+Provider modes control where model calls actually run:
+
+- `fake` — deterministic scripted provider; makes no network call ($0, default).
+- `hybrid` — real OpenAI input-token preflight (free) plus scripted
+  generation ($0).
+- `live` — real OpenAI generation (requires `OPENAI_API_KEY`).
+
+### Response shape
+
+The endpoint returns a governed result describing the run at a high level:
+
+- `status` — `repaired` or `not_repaired`.
+- `evaluation` — the sealed ground-truth verdict (target tests pass plus the
+  change policy), computed independently of the agent.
+- `finalText` — the agent's summary of the fix (or of why it could not repair).
+- `trace` — the governed trace of responses, tool calls, and any suppressed
+  retries, each with a ledger snapshot.
+- reconciled spend — the run's `settledMicroUsd` (integer micro-USD),
+  reported on the governed ledger snapshot in the result.
 
 ## Implemented POC
 
@@ -84,14 +185,16 @@ and next falsification experiment. The full product and technical design is in
 
 ## Repository map
 
+- `server/app.ts`: shared Express API (demo, repair, and governed-job routes)
 - `server/governor/`: policy, cost, reservation, retry, risk, and log reduction
-- `server/openai/`: restricted no-retry Responses API adapter
+- `server/openai/`: restricted no-retry Responses API adapter and fake/hybrid/live provider factory
 - `server/runtime/`: integrated count, reserve, dispatch, and settle flow
 - `server/jobs/`: in-memory governed-job API service and exact USD conversion
+- `server/repair/`: governed CI-repair agent (sandbox, custom tools, budget tools, sealed evaluation, workflow)
 - `server/artifacts/`: bounded content-addressed artifact persistence
 - `server/demo/`: deterministic scenarios, traces, and reconciled receipts
 - `cli/`: terminal client for live governed jobs and scripted demo traces
-- `src/`: React operations dashboard
+- `src/`: React dashboard, `BrandStudio`, and the CI-Repair panel
 - `tests/` and `e2e/`: unit, integration, API, and browser coverage
 - `docs/`: design and POC findings
 
@@ -115,6 +218,10 @@ Requires Node.js 18 or later.
 npm ci
 npm start
 ```
+
+The core commands are `npm run dev` (API on `http://127.0.0.1:8787` plus the
+dashboard on `http://127.0.0.1:5173`), `npm test` (full suite), and
+`npm run build` (typecheck and production bundle).
 
 In another terminal, inspect the service and play a no-key synthetic trace:
 
@@ -183,8 +290,9 @@ The terminal-first HTTP surface is:
 - `GET /v1/jobs/:jobId/responses/:requestId`
 - `POST /v1/jobs/:jobId/finalize`
 
-The separate synthetic walkthrough surface is:
+The separate application surface is:
 
 - `GET /api/health`
 - `GET /api/demo/catalog`
 - `POST /api/demo/runs`
+- `POST /api/repair/runs`

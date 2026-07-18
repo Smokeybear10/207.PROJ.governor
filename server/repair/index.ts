@@ -28,6 +28,14 @@ export {
 } from "./budget-tools.js";
 export { evaluateRepair } from "./evaluation.js";
 export {
+  openRepairSession,
+  type BudgetAccounting,
+  type NormalizedResponse,
+  type RepairJobPolicyInput,
+  type RepairResponseRequest,
+  type RepairSession
+} from "./governor-client.js";
+export {
   runGovernedRepair,
   type GovernedRepairInput,
   type GovernedRepairResult,

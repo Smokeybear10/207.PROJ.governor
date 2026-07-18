@@ -1,54 +1,62 @@
 import { describe, expect, it } from "vitest";
 import {
-  GPT_5_NANO_STANDARD_RATE_CARD,
-  ReservationLedger,
-  calculateWorstCaseRequestCost,
-  createGovernorPolicy,
-  type GovernorPolicy
+  GPT_5_4_MINI_STANDARD_RATE_CARD,
+  calculateWorstCaseRequestCost
 } from "../server/governor/index.js";
 import { createBudgetToolbox } from "../server/repair/budget-tools.js";
+import type { BudgetAccounting } from "../server/repair/governor-client.js";
 
-const rateCard = GPT_5_NANO_STANDARD_RATE_CARD;
+const rateCard = GPT_5_4_MINI_STANDARD_RATE_CARD;
 
 const FINAL_INPUT_LIMIT = 2_000;
 const MINIMUM_FINAL_OUTPUT = 500;
+const APPLICATION_CEILING_MICRO_USD = 1_000_000;
+const FINAL_RESERVE_MICRO_USD = 100_000;
 
-// The policy's final reserve must be able to fund the bounded final request
-// (see ReservationLedger constructor). Derive the floor from the pure cost
-// function so the fixture stays correct if the card changes.
+// The reserve must be able to fund the bounded final request. Derive the floor
+// from the pure cost function so the fixture stays correct if the card changes.
 const boundedFinalCost = calculateWorstCaseRequestCost(
   rateCard,
   FINAL_INPUT_LIMIT,
   MINIMUM_FINAL_OUTPUT
 ).totalMicroUsd;
 
-const basePolicy: GovernorPolicy = createGovernorPolicy({
-  applicationCeilingMicroUsd: 1_000_000,
-  finalAnswerReserveMicroUsd: 10_000,
-  finalAnswerInputTokenLimit: FINAL_INPUT_LIMIT,
-  minimumFinalOutputTokens: MINIMUM_FINAL_OUTPUT,
-  maxResponses: 6,
-  maxEquivalentRetries: 3,
-  rateCardVersion: rateCard.version
-});
+/** A fresh-job accounting snapshot; overrides model post-spend or policy tweaks. */
+function makeAccounting(
+  overrides: Partial<BudgetAccounting> = {}
+): BudgetAccounting {
+  return {
+    applicationCeilingMicroUsd: APPLICATION_CEILING_MICRO_USD,
+    committedMicroUsd: 0,
+    availableForWorkMicroUsd:
+      APPLICATION_CEILING_MICRO_USD - FINAL_RESERVE_MICRO_USD,
+    finalAnswerReserveMicroUsd: FINAL_RESERVE_MICRO_USD,
+    finalAnswerInputTokenLimit: FINAL_INPUT_LIMIT,
+    minimumFinalOutputTokens: MINIMUM_FINAL_OUTPUT,
+    maxResponses: 6,
+    responsesStarted: 0,
+    ...overrides
+  };
+}
 
 function makeToolbox(
-  policy: GovernorPolicy,
+  accounting: BudgetAccounting,
   currentInputTokens: () => number
 ) {
-  const ledger = new ReservationLedger(policy, rateCard);
-  return createBudgetToolbox(ledger, rateCard, { currentInputTokens });
+  return createBudgetToolbox({
+    getAccounting: () => accounting,
+    rateCard,
+    currentInputTokens
+  });
 }
 
 describe("repair budget toolbox", () => {
   it("sanity-checks that the fixture reserve funds the bounded final request", () => {
-    expect(basePolicy.finalAnswerReserveMicroUsd).toBeGreaterThanOrEqual(
-      boundedFinalCost
-    );
+    expect(FINAL_RESERVE_MICRO_USD).toBeGreaterThanOrEqual(boundedFinalCost);
   });
 
   it("exposes the three strict, read-only budget tool definitions", () => {
-    const toolbox = makeToolbox(basePolicy, () => 1_000);
+    const toolbox = makeToolbox(makeAccounting(), () => 1_000);
     expect(toolbox.definitions.map((definition) => definition.name)).toEqual([
       "budget_status",
       "estimate_action_cost",
@@ -63,7 +71,7 @@ describe("repair budget toolbox", () => {
   });
 
   it("caps estimate_action_cost output by budget when intended is huge", async () => {
-    const toolbox = makeToolbox(basePolicy, () => 1_000);
+    const toolbox = makeToolbox(makeAccounting(), () => 1_000);
     const intended = 10_000_000;
     const result = JSON.parse(
       await toolbox.execute(
@@ -78,12 +86,12 @@ describe("repair budget toolbox", () => {
     expect(result.outputCappedBy).toBe("budget");
     expect(result.worstCaseReserveMicroUsd).toBeGreaterThan(0);
     expect(result.worstCaseReserveMicroUsd).toBeLessThanOrEqual(
-      basePolicy.applicationCeilingMicroUsd
+      APPLICATION_CEILING_MICRO_USD
     );
   });
 
   it("reports estimate_action_cost as request-capped for a modest intent", async () => {
-    const toolbox = makeToolbox(basePolicy, () => 1_000);
+    const toolbox = makeToolbox(makeAccounting(), () => 1_000);
     const result = JSON.parse(
       await toolbox.execute(
         "estimate_action_cost",
@@ -97,12 +105,12 @@ describe("repair budget toolbox", () => {
   });
 
   it("returns a valid band, response slots, and intact reserve for a fresh ledger", async () => {
-    const toolbox = makeToolbox(basePolicy, () => 1_000);
+    const toolbox = makeToolbox(makeAccounting(), () => 1_000);
     const result = JSON.parse(await toolbox.execute("budget_status", "{}"));
 
     expect(["SAFE", "WATCH", "AT_RISK"]).toContain(result.riskBand);
     expect(result.riskBand).toBe("SAFE");
-    expect(result.responsesRemaining).toBe(basePolicy.maxResponses);
+    expect(result.responsesRemaining).toBe(6);
     expect(result.budgetUsedBps).toBeGreaterThanOrEqual(0);
     expect(result.budgetUsedBps).toBeLessThanOrEqual(10_000);
     expect(result.budgetUsedBps).toBe(0);
@@ -110,11 +118,10 @@ describe("repair budget toolbox", () => {
   });
 
   it("flags AT_RISK when only the final response slot remains", async () => {
-    const onlyFinalPolicy = createGovernorPolicy({
-      ...basePolicy,
-      maxResponses: 1
-    });
-    const toolbox = makeToolbox(onlyFinalPolicy, () => 1_000);
+    const toolbox = makeToolbox(
+      makeAccounting({ maxResponses: 1 }),
+      () => 1_000
+    );
     const result = JSON.parse(await toolbox.execute("budget_status", "{}"));
 
     expect(result.responsesRemaining).toBe(1);
@@ -122,7 +129,7 @@ describe("repair budget toolbox", () => {
   });
 
   it("reports a comfortably affordable final answer within the input limit", async () => {
-    const toolbox = makeToolbox(basePolicy, () => 1_000);
+    const toolbox = makeToolbox(makeAccounting(), () => 1_000);
     const result = JSON.parse(
       await toolbox.execute(
         "check_completion_headroom",
@@ -139,8 +146,8 @@ describe("repair budget toolbox", () => {
 
   it("caps the final answer at the input limit and flags an over-limit transcript", async () => {
     const toolbox = makeToolbox(
-      basePolicy,
-      () => basePolicy.finalAnswerInputTokenLimit + 3_000
+      makeAccounting(),
+      () => FINAL_INPUT_LIMIT + 3_000
     );
     const result = JSON.parse(
       await toolbox.execute(
@@ -156,7 +163,7 @@ describe("repair budget toolbox", () => {
   });
 
   it("rejects unknown tools and invalid arguments", async () => {
-    const toolbox = makeToolbox(basePolicy, () => 1_000);
+    const toolbox = makeToolbox(makeAccounting(), () => 1_000);
 
     await expect(toolbox.execute("nope", "{}")).rejects.toMatchObject({
       code: "UNKNOWN_TOOL"

@@ -63,6 +63,114 @@ class BoundedCapture {
   }
 }
 
+/**
+ * Spawn the pinned test command in `dir` with a locked-down environment and a
+ * hard wall-clock timeout, returning bounded output. Shared by the live sandbox
+ * (`runTests`) and the sealed evaluator's fresh checkout ({@link verifyFinalState})
+ * so both execute tests through the exact same, dependency-free path.
+ */
+function runPinnedTests(
+  dir: string,
+  testCommand: readonly string[],
+  signal?: AbortSignal
+): Promise<SandboxTestRun> {
+  const [command, ...args] = testCommand;
+  const capture = new BoundedCapture();
+  const start = Date.now();
+
+  return new Promise<SandboxTestRun>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: dir,
+      shell: false,
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        NODE_OPTIONS: ""
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let settled = false;
+    let killedByTimeout = false;
+
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    };
+    const finish = (run: SandboxTestRun): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(run);
+    };
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const timer = setTimeout(() => {
+      killedByTimeout = true;
+      child.kill("SIGKILL");
+    }, TEST_TIMEOUT_MS);
+
+    const onAbort = (): void => {
+      killedByTimeout = true;
+      child.kill("SIGKILL");
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
+    child.stdout?.on("data", (chunk: Buffer) => capture.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => capture.push(chunk));
+
+    child.on("error", (error) => fail(error));
+    child.on("close", (code) => {
+      finish({
+        exitCode: killedByTimeout ? TIMEOUT_EXIT_CODE : code ?? TIMEOUT_EXIT_CODE,
+        durationMs: Date.now() - start,
+        stdout: capture.toString()
+      });
+    });
+  });
+}
+
+/**
+ * Sealed final verification in a throwaway checkout. Copies the PRISTINE
+ * fixture template into a brand-new temp dir, overlays ONLY the agent's final
+ * allowlisted file contents, then runs the pinned tests there. Anything the
+ * agent may have touched outside the allowlist inside its own sandbox (protected
+ * paths, non-allowlisted files, stray writes) is discarded, so a green result
+ * cannot be manufactured by tampering with the sandbox working tree.
+ */
+export async function verifyFinalState(
+  fixture: RepairFixture,
+  finalContents: ReadonlyMap<string, string>,
+  signal?: AbortSignal
+): Promise<SandboxTestRun> {
+  const dir = await mkdtemp(join(tmpdir(), `repair-verify-${fixture.id}-`));
+  try {
+    await cp(fixture.rootDir, dir, { recursive: true });
+    for (const path of fixture.allowlistedPaths) {
+      const content = finalContents.get(path);
+      if (content !== undefined) {
+        writeFileSync(join(dir, path), content, "utf8");
+      }
+    }
+    return await runPinnedTests(dir, fixture.testCommand, signal);
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 export async function createRepairSandbox(
   fixture: RepairFixture
 ): Promise<RepairSandbox> {
@@ -159,73 +267,7 @@ export async function createRepairSandbox(
   }
 
   async function runTests(signal?: AbortSignal): Promise<SandboxTestRun> {
-    const [command, ...args] = fixture.testCommand;
-    const capture = new BoundedCapture();
-    const start = Date.now();
-
-    return await new Promise<SandboxTestRun>((resolve, reject) => {
-      const child = spawn(command, args, {
-        cwd: dir,
-        shell: false,
-        env: {
-          PATH: process.env.PATH ?? "",
-          HOME: process.env.HOME ?? "",
-          NODE_OPTIONS: ""
-        },
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-
-      let settled = false;
-      let killedByTimeout = false;
-
-      const cleanup = (): void => {
-        clearTimeout(timer);
-        if (signal) {
-          signal.removeEventListener("abort", onAbort);
-        }
-      };
-      const finish = (run: SandboxTestRun): void => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(run);
-      };
-      const fail = (error: Error): void => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
-      };
-
-      const timer = setTimeout(() => {
-        killedByTimeout = true;
-        child.kill("SIGKILL");
-      }, TEST_TIMEOUT_MS);
-
-      const onAbort = (): void => {
-        killedByTimeout = true;
-        child.kill("SIGKILL");
-      };
-      if (signal) {
-        if (signal.aborted) {
-          onAbort();
-        } else {
-          signal.addEventListener("abort", onAbort, { once: true });
-        }
-      }
-
-      child.stdout?.on("data", (chunk: Buffer) => capture.push(chunk));
-      child.stderr?.on("data", (chunk: Buffer) => capture.push(chunk));
-
-      child.on("error", (error) => fail(error));
-      child.on("close", (code) => {
-        finish({
-          exitCode: killedByTimeout ? TIMEOUT_EXIT_CODE : code ?? TIMEOUT_EXIT_CODE,
-          durationMs: Date.now() - start,
-          stdout: capture.toString()
-        });
-      });
-    });
+    return await runPinnedTests(dir, fixture.testCommand, signal);
   }
 
   function editedPaths(): readonly string[] {

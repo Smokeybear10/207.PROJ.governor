@@ -2,21 +2,22 @@ import { z } from "zod";
 import {
   calculateAdmissibleOutputCap,
   calculateWorstCaseRequestCost,
-  ReservationLedger,
   type RateCard
 } from "../governor/index.js";
 import type { JsonObject } from "../openai/index.js";
+import type { BudgetAccounting } from "./governor-client.js";
 import { BUDGET_TOOL_NAMES, type BudgetToolbox } from "./types.js";
 
 /**
  * Budget-aware toolbox for the governed CI-repair agent.
  *
  * These are strictly READ-ONLY shims that expose the governor's cost knowledge
- * to the agent so it can self-optimize spend. They compute exclusively over an
- * immutable `ledger.getSnapshot()` plus the pure cost functions and NEVER
- * mutate the ledger and NEVER call the provider. Every tool returns a compact
- * JSON string that surfaces categorical/band information and derived caps only
- * (never the raw reserve dollars) to keep the signal hard to game.
+ * to the agent so it can self-optimize spend. They compute exclusively over the
+ * governor SERVICE's projected {@link BudgetAccounting} snapshot plus the pure
+ * cost functions and NEVER mutate the ledger and NEVER call the provider. Every
+ * tool returns a compact JSON string that surfaces categorical/band information
+ * and derived caps only (never the raw reserve dollars) to keep the signal hard
+ * to game.
  */
 
 export const MAX_BUDGET_TOOL_ARGUMENT_BYTES = 8 * 1024;
@@ -233,19 +234,19 @@ function serializeResult(result: Readonly<Record<string, unknown>>): string {
 }
 
 export interface BudgetToolboxOptions {
+  /** Latest budget accounting projected from the governor service. */
+  readonly getAccounting: () => BudgetAccounting;
+  /** Pinned rate card the governor service prices against. */
+  readonly rateCard: RateCard;
   /** Exact input-token count of the CURRENT transcript, supplied by the workflow. */
   readonly currentInputTokens: () => number;
 }
 
-export function createBudgetToolbox(
-  ledger: ReservationLedger,
-  rateCard: RateCard,
-  options: BudgetToolboxOptions
-): BudgetToolbox {
-  if (!(ledger instanceof ReservationLedger)) {
+export function createBudgetToolbox(options: BudgetToolboxOptions): BudgetToolbox {
+  if (typeof options?.getAccounting !== "function") {
     throw new BudgetToolError(
       "INVALID_ARGUMENTS",
-      "A ReservationLedger is required."
+      "options.getAccounting must be a function."
     );
   }
   if (typeof options?.currentInputTokens !== "function") {
@@ -254,6 +255,7 @@ export function createBudgetToolbox(
       "options.currentInputTokens must be a function."
     );
   }
+  const rateCard = options.rateCard;
 
   function currentInputTokens(): number {
     const tokens = options.currentInputTokens();
@@ -267,27 +269,27 @@ export function createBudgetToolbox(
   }
 
   function budgetStatus(): string {
-    const snapshot = ledger.getSnapshot();
-    const ceiling = snapshot.policy.applicationCeilingMicroUsd;
-    const available = snapshot.availableForWorkMicroUsd;
+    const accounting = options.getAccounting();
+    const ceiling = accounting.applicationCeilingMicroUsd;
+    const available = accounting.availableForWorkMicroUsd;
     const responsesRemaining = Math.max(
       0,
-      snapshot.policy.maxResponses - snapshot.responsesStarted
+      accounting.maxResponses - accounting.responsesStarted
     );
 
     const budgetUsedBps = Math.min(
       BASIS_POINTS,
       Math.max(
         0,
-        Math.round((snapshot.committedMicroUsd * BASIS_POINTS) / ceiling)
+        Math.round((accounting.committedMicroUsd * BASIS_POINTS) / ceiling)
       )
     );
 
     // The protected reserve is intact while all committed spend still fits
     // inside the work budget (i.e. nothing has dipped into the reserve yet).
     const finalReserveIntact =
-      snapshot.committedMicroUsd <=
-      ceiling - snapshot.policy.finalAnswerReserveMicroUsd;
+      accounting.committedMicroUsd <=
+      ceiling - accounting.finalAnswerReserveMicroUsd;
 
     let riskBand: "SAFE" | "WATCH" | "AT_RISK";
     if (available <= ceiling * 0.1 || responsesRemaining <= 1) {
@@ -310,9 +312,9 @@ export function createBudgetToolbox(
   function estimateActionCost(
     arguments_: EstimateActionCostArguments
   ): string {
-    const snapshot = ledger.getSnapshot();
+    const accounting = options.getAccounting();
     const inputTokens = currentInputTokens();
-    const available = snapshot.availableForWorkMicroUsd;
+    const available = accounting.availableForWorkMicroUsd;
 
     const admissibleMaxOutputTokens = calculateAdmissibleOutputCap(
       rateCard,
@@ -342,28 +344,27 @@ export function createBudgetToolbox(
   function checkCompletionHeadroom(
     arguments_: CheckCompletionHeadroomArguments
   ): string {
-    const snapshot = ledger.getSnapshot();
-    const { policy } = snapshot;
+    const accounting = options.getAccounting();
     const inputTokens = currentInputTokens();
     const cappedInputTokens = Math.min(
       inputTokens,
-      policy.finalAnswerInputTokenLimit
+      accounting.finalAnswerInputTokenLimit
     );
 
     const admissibleFinalOutputTokens = calculateAdmissibleOutputCap(
       rateCard,
       cappedInputTokens,
-      policy.finalAnswerReserveMicroUsd,
+      accounting.finalAnswerReserveMicroUsd,
       arguments_.desired_final_output_tokens
     );
 
     return serializeResult({
       tool: "check_completion_headroom",
       finalAnswerAffordable:
-        admissibleFinalOutputTokens >= policy.minimumFinalOutputTokens,
+        admissibleFinalOutputTokens >= accounting.minimumFinalOutputTokens,
       admissibleFinalOutputTokens,
       withinFinalInputLimit:
-        inputTokens <= policy.finalAnswerInputTokenLimit
+        inputTokens <= accounting.finalAnswerInputTokenLimit
     });
   }
 

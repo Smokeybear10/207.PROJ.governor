@@ -3,27 +3,27 @@ import {
   type ArtifactStore
 } from "../artifacts/index.js";
 import {
+  GPT_5_4_MINI_STANDARD_RATE_CARD,
   RetryFingerprintTracker,
   type JsonValue,
-  type LedgerSnapshot,
-  type RateCard,
-  type ReservationLedger,
   type RetryState
 } from "../governor/index.js";
+import type { GovernedJobService } from "../jobs/index.js";
 import {
   ResponseOutputError,
   extractFinalText,
   parseWorkOutput,
-  type JsonObject,
-  type ResponseContext
+  type JsonObject
 } from "../openai/index.js";
-import {
-  executeGovernedResponse,
-  type GovernedExecutionResult,
-  type ResponsesProvider
-} from "../runtime/index.js";
+import type { GovernedExecutionResult } from "../runtime/index.js";
 import { createBudgetToolbox } from "./budget-tools.js";
 import { evaluateRepair } from "./evaluation.js";
+import {
+  openRepairSession,
+  type BudgetAccounting,
+  type NormalizedResponse,
+  type RepairSession
+} from "./governor-client.js";
 import { createRepairToolbox } from "./tools.js";
 import {
   BUDGET_TOOL_NAMES,
@@ -35,6 +35,16 @@ import {
 const MAX_WORK_RESPONSES = 8;
 const JOB_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const BUDGET_TOOL_NAME_SET = new Set<string>(BUDGET_TOOL_NAMES);
+
+const DEFAULT_BUDGET_USD = "1.00";
+const DEFAULT_MAX_RESPONSES = 6;
+const DEFAULT_FINAL_INPUT_TOKEN_LIMIT = 4_096;
+const DEFAULT_MINIMUM_FINAL_OUTPUT_TOKENS = 100;
+
+// The governor service pins ledger `maxEquivalentRetries=0`, so identical retries
+// can never be admitted. We keep an app-level tracker with a small local limit to
+// short-circuit repeated no-progress tool calls before they reach the service.
+const LOCAL_MAX_EQUIVALENT_RETRIES = 1;
 
 const REPAIR_INSTRUCTIONS = [
   "You are an autonomous build-repair agent working inside an isolated sandbox.",
@@ -55,7 +65,7 @@ export type RepairTraceEvent =
       readonly requestId: string;
       readonly status: GovernedExecutionResult["status"];
       readonly responseId?: string;
-      readonly snapshot: LedgerSnapshot;
+      readonly accounting: BudgetAccounting;
     }
   | {
       readonly kind: "tool";
@@ -100,7 +110,8 @@ export type GovernedRepairResult =
       readonly trace: readonly RepairTraceEvent[];
       readonly toolCalls: number;
       readonly revision: string;
-      readonly snapshot: LedgerSnapshot;
+      readonly accounting: BudgetAccounting;
+      readonly settledMicroUsd: number;
     }
   | {
       readonly status: "not_repaired";
@@ -110,18 +121,20 @@ export type GovernedRepairResult =
       readonly trace: readonly RepairTraceEvent[];
       readonly toolCalls: number;
       readonly revision: string;
-      readonly snapshot: LedgerSnapshot;
+      readonly accounting: BudgetAccounting;
+      readonly settledMicroUsd: number;
     };
 
 export type GovernedRepairInput = {
-  readonly jobId: string;
-  readonly ledger: ReservationLedger;
-  readonly rateCard: RateCard;
-  readonly provider: ResponsesProvider;
+  readonly service: GovernedJobService;
   readonly sandbox: RepairSandbox;
   readonly fixture: RepairFixture;
   readonly artifactStore?: ArtifactStore;
-  readonly model?: string;
+  readonly jobId?: string;
+  readonly budgetUsd?: string;
+  readonly maxResponses?: number;
+  readonly finalInputTokenLimit?: number;
+  readonly minimumFinalOutputTokens?: number;
   readonly maxWorkResponses?: number;
   readonly workMaxOutputTokens?: number;
   readonly workMinimumOutputTokens?: number;
@@ -176,25 +189,11 @@ function finalPrompt(repaired: boolean): JsonObject {
   };
 }
 
-function responseContext(
-  model: string,
-  transcript: readonly JsonObject[],
-  tools?: readonly JsonObject[]
-): ResponseContext {
-  return {
-    model,
-    instructions: REPAIR_INSTRUCTIONS,
-    input: [...transcript],
-    ...(tools === undefined ? {} : { tools: [...tools] }),
-    service_tier: "default"
-  };
-}
-
 function responseEvent(
   sequence: number,
   phase: "work" | "final",
   requestId: string,
-  result: GovernedExecutionResult
+  result: NormalizedResponse
 ): RepairTraceEvent {
   return Object.freeze({
     kind: "response" as const,
@@ -202,14 +201,31 @@ function responseEvent(
     phase,
     requestId,
     status: result.status,
-    ...("response" in result ? { responseId: result.response?.id } : {}),
-    snapshot: result.snapshot
+    ...(result.status === "settled"
+      ? { responseId: result.responseId }
+      : {}),
+    accounting: result.accounting
   });
 }
 
-function classifyWorkStop(
-  result: GovernedExecutionResult
-): RepairStopReason | null {
+function classifyFinalStop(
+  status: Exclude<NormalizedResponse["status"], "settled">
+): RepairStopReason {
+  switch (status) {
+    case "preflight_failed":
+      return "FINAL_PREFLIGHT_FAILED";
+    case "denied":
+      return "FINAL_DENIED";
+    case "provider_rejected":
+      return "FINAL_PROVIDER_REJECTED";
+    case "unresolved":
+      return "FINAL_UNRESOLVED";
+    case "provider_stopped":
+      return "FINAL_PROVIDER_STOPPED";
+  }
+}
+
+function classifyWorkStop(result: NormalizedResponse): RepairStopReason | null {
   if (result.status === "preflight_failed") return "WORK_PREFLIGHT_FAILED";
   if (result.status === "denied") return "WORK_DENIED";
   if (result.status === "provider_rejected") return "WORK_PROVIDER_REJECTED";
@@ -220,25 +236,47 @@ function classifyWorkStop(
   return null;
 }
 
+function settledMicroUsdFor(
+  service: GovernedJobService,
+  jobId: string
+): number {
+  const job = service.getJob(jobId) as {
+    accounting?: { settled_micro_usd?: unknown };
+  };
+  const settled = job.accounting?.settled_micro_usd;
+  return Number.isSafeInteger(settled) ? (settled as number) : 0;
+}
+
 export async function runGovernedRepair(
   input: GovernedRepairInput
 ): Promise<GovernedRepairResult> {
-  if (!JOB_ID_PATTERN.test(input.jobId)) {
+  const jobLabel = input.jobId ?? "repair";
+  if (!JOB_ID_PATTERN.test(jobLabel)) {
     throw new Error("jobId contains unsupported characters.");
   }
 
-  const policy = input.ledger.getSnapshot().policy;
-  const pricing = input.ledger.getPricingIdentity();
-  const model = input.model ?? pricing.model;
-  if (model !== pricing.model) {
-    throw new Error("Repair model does not match the ledger rate card.");
-  }
+  const maxResponses = input.maxResponses ?? DEFAULT_MAX_RESPONSES;
+  const finalInputTokenLimit =
+    input.finalInputTokenLimit ?? DEFAULT_FINAL_INPUT_TOKEN_LIMIT;
+  const minimumFinalOutputTokens =
+    input.minimumFinalOutputTokens ?? DEFAULT_MINIMUM_FINAL_OUTPUT_TOKENS;
 
+  const session = openRepairSession(input.service, {
+    budget_usd: input.budgetUsd ?? DEFAULT_BUDGET_USD,
+    final_input_token_limit: finalInputTokenLimit,
+    minimum_final_output_tokens: minimumFinalOutputTokens,
+    max_responses: maxResponses
+  });
+
+  const workResponseCeiling = Math.max(
+    1,
+    Math.min(MAX_WORK_RESPONSES, maxResponses - 1)
+  );
   const maxWorkResponses = requireBoundedInteger(
-    input.maxWorkResponses ?? Math.min(MAX_WORK_RESPONSES, policy.maxResponses - 1),
+    input.maxWorkResponses ?? workResponseCeiling,
     "maxWorkResponses",
     1,
-    Math.min(MAX_WORK_RESPONSES, policy.maxResponses - 1)
+    workResponseCeiling
   );
   const workMaxOutputTokens = requireBoundedInteger(
     input.workMaxOutputTokens ?? 1_024,
@@ -253,16 +291,18 @@ export async function runGovernedRepair(
     workMaxOutputTokens
   );
   const finalMaxOutputTokens = requireBoundedInteger(
-    input.finalMaxOutputTokens ?? Math.max(1_024, policy.minimumFinalOutputTokens),
+    input.finalMaxOutputTokens ?? Math.max(1_024, minimumFinalOutputTokens),
     "finalMaxOutputTokens",
-    policy.minimumFinalOutputTokens,
+    minimumFinalOutputTokens,
     16_384
   );
 
   const artifactStore = input.artifactStore ?? new MemoryArtifactStore();
   const repairTools = createRepairToolbox(input.sandbox, artifactStore);
   let lastInputTokens = 0;
-  const budgetTools = createBudgetToolbox(input.ledger, input.rateCard, {
+  const budgetTools = createBudgetToolbox({
+    getAccounting: () => session.getAccounting(),
+    rateCard: GPT_5_4_MINI_STANDARD_RATE_CARD,
     currentInputTokens: () => lastInputTokens
   });
   const toolDefinitions: JsonObject[] = [
@@ -270,7 +310,9 @@ export async function runGovernedRepair(
     ...budgetTools.definitions
   ];
 
-  const retryTracker = new RetryFingerprintTracker(policy.maxEquivalentRetries);
+  const retryTracker = new RetryFingerprintTracker(
+    LOCAL_MAX_EQUIVALENT_RETRIES
+  );
   const transcript: JsonObject[] = initialInput(input.sandbox);
   const trace: RepairTraceEvent[] = [];
   const seenCallIds = new Set<string>();
@@ -285,16 +327,15 @@ export async function runGovernedRepair(
   };
 
   for (let turn = 1; turn <= maxWorkResponses; turn += 1) {
-    const requestId = `${input.jobId}:work:${turn}`;
-    const result = await executeGovernedResponse({
-      ledger: input.ledger,
-      provider: input.provider,
+    const requestId = `${jobLabel}:work:${turn}`;
+    const result = await session.respond({
       requestId,
-      context: responseContext(model, transcript, toolDefinitions),
-      requestedMaxOutputTokens: workMaxOutputTokens,
-      minimumUsefulOutputTokens: workMinimumOutputTokens,
       phase: "work",
-      signal: input.signal
+      input: [...transcript],
+      instructions: REPAIR_INSTRUCTIONS,
+      tools: toolDefinitions,
+      maxOutputTokens: workMaxOutputTokens,
+      minimumOutputTokens: workMinimumOutputTokens
     });
     emit(responseEvent(++sequence, "work", requestId, result));
 
@@ -310,11 +351,11 @@ export async function runGovernedRepair(
       stopReason = "WORK_PROVIDER_STOPPED";
       break;
     }
-    lastInputTokens = result.reservation.exactInputTokens;
+    lastInputTokens = result.exactInputTokens;
 
     let parsed: ReturnType<typeof parseWorkOutput>;
     try {
-      parsed = parseWorkOutput(result.response.output);
+      parsed = parseWorkOutput(result.output);
     } catch (error) {
       if (error instanceof ResponseOutputError) {
         stopReason = "OUTPUT_PROTOCOL_ERROR";
@@ -402,7 +443,7 @@ export async function runGovernedRepair(
 
   if (stopReason !== null && stopReason !== "RETRY_LIMIT_REACHED") {
     const evaluation = await safeEvaluate(input);
-    return notRepaired(stopReason, evaluation, null, trace, toolCalls, input);
+    return notRepaired(stopReason, evaluation, null, trace, toolCalls, input, session);
   }
   if (stopReason === null && !testsPassed) {
     // Loop exhausted without a passing run.
@@ -411,49 +452,46 @@ export async function runGovernedRepair(
 
   // Final governed summary response (no tools).
   transcript.push(finalPrompt(testsPassed));
-  const finalRequestId = `${input.jobId}:final`;
-  const finalResult = await executeGovernedResponse({
-    ledger: input.ledger,
-    provider: input.provider,
+  const finalRequestId = `${jobLabel}:final`;
+  const finalResult = await session.respond({
     requestId: finalRequestId,
-    context: responseContext(model, transcript),
-    requestedMaxOutputTokens: finalMaxOutputTokens,
-    minimumUsefulOutputTokens: policy.minimumFinalOutputTokens,
     phase: "final",
-    signal: input.signal
+    input: [...transcript],
+    instructions: REPAIR_INSTRUCTIONS,
+    maxOutputTokens: finalMaxOutputTokens,
+    minimumOutputTokens: minimumFinalOutputTokens
   });
   emit(responseEvent(++sequence, "final", finalRequestId, finalResult));
 
   const evaluation = await safeEvaluate(input);
 
-  if (finalResult.status === "preflight_failed") {
-    return notRepaired("FINAL_PREFLIGHT_FAILED", evaluation, null, trace, toolCalls, input);
-  }
-  if (finalResult.status === "denied") {
-    return notRepaired("FINAL_DENIED", evaluation, null, trace, toolCalls, input);
-  }
-  if (finalResult.status === "provider_rejected") {
-    return notRepaired("FINAL_PROVIDER_REJECTED", evaluation, null, trace, toolCalls, input);
-  }
-  if (finalResult.status === "unresolved") {
-    return notRepaired("FINAL_UNRESOLVED", evaluation, null, trace, toolCalls, input);
-  }
-  if (finalResult.status === "provider_stopped") {
-    return notRepaired("FINAL_PROVIDER_STOPPED", evaluation, null, trace, toolCalls, input);
+  if (finalResult.status !== "settled") {
+    return notRepaired(
+      classifyFinalStop(finalResult.status),
+      evaluation,
+      null,
+      trace,
+      toolCalls,
+      input,
+      session
+    );
   }
 
   let finalText: string;
   try {
-    finalText = extractFinalText(finalResult.response.output);
+    finalText = extractFinalText(finalResult.output);
   } catch (error) {
-    input.ledger.finalizeFinalResponse(finalRequestId, false);
+    await session.finalize(finalRequestId, false);
     if (error instanceof ResponseOutputError) {
-      return notRepaired("FINAL_OUTPUT_INVALID", evaluation, null, trace, toolCalls, input);
+      return notRepaired("FINAL_OUTPUT_INVALID", evaluation, null, trace, toolCalls, input, session);
     }
     throw error;
   }
 
-  input.ledger.finalizeFinalResponse(finalRequestId, evaluation?.passed === true);
+  await session.finalize(finalRequestId, evaluation?.passed === true);
+
+  const accounting = session.getAccounting();
+  const settledMicroUsd = settledMicroUsdFor(input.service, session.jobId);
 
   if (evaluation !== null && evaluation.passed) {
     return Object.freeze({
@@ -463,7 +501,8 @@ export async function runGovernedRepair(
       trace: Object.freeze([...trace]),
       toolCalls,
       revision: input.sandbox.revision(),
-      snapshot: input.ledger.getSnapshot()
+      accounting,
+      settledMicroUsd
     });
   }
   return notRepaired(
@@ -472,7 +511,8 @@ export async function runGovernedRepair(
     finalText,
     trace,
     toolCalls,
-    input
+    input,
+    session
   );
 }
 
@@ -492,7 +532,8 @@ function notRepaired(
   finalText: string | null,
   trace: readonly RepairTraceEvent[],
   toolCalls: number,
-  input: GovernedRepairInput
+  input: GovernedRepairInput,
+  session: RepairSession
 ): GovernedRepairResult {
   return Object.freeze({
     status: "not_repaired" as const,
@@ -502,6 +543,7 @@ function notRepaired(
     trace: Object.freeze([...trace]),
     toolCalls,
     revision: input.sandbox.revision(),
-    snapshot: input.ledger.getSnapshot()
+    accounting: session.getAccounting(),
+    settledMicroUsd: settledMicroUsdFor(input.service, session.jobId)
   });
 }

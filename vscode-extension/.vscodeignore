@@ -1,0 +1,40 @@
+# .vscodeignore — controls what ends up inside the packaged .vsix.
+# Uses .gitignore-style globs. Anything matched here is EXCLUDED from the VSIX.
+#
+# What we KEEP (NOT listed below, so they are bundled):
+#   out/**            compiled JavaScript (the actual runtime)
+#   package.json      extension manifest
+#   README.md         marketplace description
+#   media/**          icons / assets referenced by the manifest
+#   LICENSE           license file, if present
+
+# --- TypeScript sources & configs (dev-only) ---
+src/**
+**/*.ts
+tsconfig.json
+vitest.config.ts
+
+# --- Source maps (not needed at runtime) ---
+**/*.map
+
+# --- Tests ---
+**/*.spec.*
+**/*.test.*
+out/test/**
+
+# --- Editor / tooling / CI metadata ---
+.vscode/**
+.github/**
+scripts/**
+node_modules/.cache/**
+
+# --- Packaging / deploy artifacts & docs ---
+DEPLOY.md
+dist/**
+*.vsix
+.gitignore
+.vscodeignore
+
+# --- Lockfiles & misc (dependencies bundled via --no-dependencies) ---
+package-lock.json
+.DS_Store
