@@ -36,7 +36,7 @@ The dashboard is a supporting demo surface, not the MVP.
       risk, per-response statuses)
 - [ ] Freeze demo fixtures by 2:30
 
-## Aryan — AI integration
+## Aryan — AI integration, evaluator, plugin conversion
 
 - [ ] Live OpenAI run through the governed path (`OPENAI_API_KEY=... npm start`,
       then job create → response create → finalize)
@@ -44,6 +44,15 @@ The dashboard is a supporting demo surface, not the MVP.
 - [ ] Record at least one successful live trace before 2:30 as the Codex-track
       proof; screenshot the receipt
 - [ ] Redeem Codex credits (email after check-in; Tyler is the contact)
+- [ ] Evaluation runner: score frozen runs against sealed ground truth, cost
+      per successful task (picked up from Aarav's stretch list)
+- [ ] Converting Aarav's `vscode-extension/` into a plugin — confirm target
+      (Cursor-specific packaging vs. something else) so nobody duplicates
+      the sidebar work; extension already works unmodified in Cursor since
+      it's a VS Code fork, worth checking before rebuilding anything
+
+This is a lot on one person with a hard 3:00 freeze — flag early if any of
+these three need to be dropped rather than discovering it at 2:45.
 
 ## Azdeen — caveats and pitch
 

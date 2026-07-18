@@ -54,13 +54,12 @@ governor API without leaving the editor.
       job show, and submit-response (correctly refuses with
       `PROVIDER_NOT_CONFIGURED` when no key is set, which the extension's
       error handling already catches as a warning, not a crash)
-- [ ] Press F5 yourself, confirm the sidebar renders and the status bar
-      updates live (needs a real VS Code GUI, can't be done headless)
-- [ ] Repeat against a live `OPENAI_API_KEY` run with Aryan once he has one
-      going, to get a real (non-refused) trace through the extension
-- [ ] Screenshot the sidebar + status bar for the pitch
-- Done means: create a job, submit work, and watch spend + risk update in the
-  status bar, live in front of a judge.
+- **Handed off:** Aryan is converting `vscode-extension/` into a plugin and
+  is also building the evaluator. Aarav's VS Code extension deliverable
+  ends here — do not keep building on `vscode-extension/` without
+  syncing with Aryan first, since he is now forking/extending it.
+- Done (for Aarav's part) means: the extension worked end to end against
+  the local server before handoff, contract verified above.
 
 ### 2. Done
 
