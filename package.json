@@ -1,11 +1,20 @@
 {
   "name": "token-governor",
   "version": "0.1.0",
+  "description": "Governor 207: budget-aware AI execution, built at the 2026 Ramp Hackathon.",
   "private": true,
   "type": "module",
+  "bin": {
+    "token-governor": "./cli/codex-governor.mjs"
+  },
   "engines": {
     "node": ">=18"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Smokeybear10/207.PROJ.governor.git"
+  },
+  "homepage": "https://governor-207.vercel.app/",
   "scripts": {
     "dev": "concurrently --kill-others -n api,web -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "tsx watch server/main.ts",
@@ -13,6 +22,7 @@
     "governor": "tsx cli/token-governor.ts",
     "station:rehearsal": "tsx station/rehearsal-server.ts",
     "station:demo": "bash station/run-demo.sh",
+    "governor:codex": "node cli/codex-governor.mjs",
     "start": "tsx server/main.ts",
     "build": "tsc --noEmit && vite build",
     "lint": "tsc --noEmit",
@@ -20,6 +30,7 @@
     "test": "vitest run",
     "test:core": "vitest run tests/governor-core.test.ts tests/governor-cost-ledger.test.ts tests/governor-policy.test.ts tests/governor-log-reducer.test.ts",
     "test:api": "vitest run tests/app.test.ts tests/server-startup.test.ts tests/openai-client.test.ts tests/governed-executor.test.ts tests/jobs-api.test.ts tests/cli.test.ts",
+    "test:extension": "vitest run tests/codex-extension.test.ts",
     "test:watch": "vitest",
     "test:e2e": "playwright test --pass-with-no-tests",
     "check": "npm run lint && npm test && npm run build"

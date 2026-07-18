@@ -1,0 +1,23 @@
+{
+  "name": "token-governor",
+  "version": "0.1.0",
+  "description": "Require governed Codex launches and enforce a shared host token cap.",
+  "author": {
+    "name": "Token Governor"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Token Governor",
+    "shortDescription": "Gate Codex prompts behind a session token cap.",
+    "longDescription": "Pairs a prompt admission hook with Codex's native shared rollout budget.",
+    "developerName": "Token Governor",
+    "category": "Productivity",
+    "capabilities": [
+      "Lifecycle hooks",
+      "Token budgets"
+    ],
+    "defaultPrompt": [
+      "Is this Codex session governed?"
+    ]
+  }
+}

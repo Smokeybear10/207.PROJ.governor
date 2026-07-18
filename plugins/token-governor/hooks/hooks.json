@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/prompt-gate.mjs\"",
+            "timeout": 5,
+            "statusMessage": "Checking Token Governor admission"
+          }
+        ]
+      }
+    ]
+  }
+}
