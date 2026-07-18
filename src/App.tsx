@@ -171,10 +171,12 @@ function actionParts(action: TraceAction | string): TraceAction {
 
 function AppHeader({
   catalogStatus,
-  playbackStatus
+  playbackStatus,
+  stationMode
 }: {
   catalogStatus: CatalogStatus;
   playbackStatus: PlaybackStatus;
+  stationMode: boolean;
 }): React.JSX.Element {
   const operationalLabel =
     catalogStatus === "loading"
@@ -210,6 +212,11 @@ function AppHeader({
           <span className="brand-context">Execution control</span>
         </div>
         <div className="truth-strip" aria-label="Data provenance and run state">
+          {stationMode && (
+            <span className="station-badge" aria-label="Station loop active">
+              STATION LOOP
+            </span>
+          )}
           <span className="truth-badge">
             GOVERNOR CORE / SCRIPTED INPUTS / 0 EXTERNAL CALLS
           </span>
@@ -234,7 +241,14 @@ function TruthDisclosure({
   label: string;
 }): React.JSX.Element {
   return (
-    <div className="truth-disclosure" aria-label={label} title={truth.truthLabel}>
+    <details
+      className="truth-disclosure"
+      aria-label={label}
+      title={truth.truthLabel}
+    >
+      <summary>
+        Deterministic demo: synthetic usage, pinned list prices, not billed
+      </summary>
       <p>
         <strong>{truth.provenance.origin}</strong>
         <span>{truth.provenance.governorCore}</span>
@@ -246,7 +260,7 @@ function TruthDisclosure({
         {" "}
         {truth.rateCard.disclosure}
       </p>
-    </div>
+    </details>
   );
 }
 
@@ -372,8 +386,13 @@ function CommandBand({
   return (
     <section className="command-band" aria-labelledby="dashboard-title">
       <div className="command-context">
-        <p className="eyebrow">Governed PR review</p>
-        <h1 id="dashboard-title">Execution control</h1>
+        <p className="eyebrow">Governor / AI spend control</p>
+        <h1 id="dashboard-title">AI agents that finish under budget</h1>
+        <p className="pitch-line">
+          A hard cap stops an agent when the money is gone. Governor prices
+          every model call before it runs, intervenes when the job drifts, and
+          protects enough budget to deliver the final answer.
+        </p>
         <p className="scenario-description">
           {catalogStatus === "loading"
             ? "Loading scripted fixture scenarios..."
@@ -483,6 +502,14 @@ function LoadingState(): React.JSX.Element {
   );
 }
 
+const ADMISSION_PIPELINE = [
+  { step: "COUNT", detail: "exact input preflight" },
+  { step: "PRICE", detail: "pinned rate card" },
+  { step: "RESERVE", detail: "worst case, up front" },
+  { step: "CAP", detail: "bounded output" },
+  { step: "SETTLE", detail: "provider-reported usage" }
+] as const;
+
 function ReadyState({
   scenario,
   controller
@@ -490,27 +517,77 @@ function ReadyState({
   scenario?: ScenarioSummary;
   controller: Controller;
 }): React.JSX.Element {
+  const diffFacts = [
+    scenario?.changedFiles !== undefined &&
+      `${formatNumber(scenario.changedFiles)} files`,
+    scenario?.changedLines !== undefined &&
+      `${formatNumber(scenario.changedLines)} changed lines`,
+    scenario?.initialContextTokens !== undefined &&
+      `${formatNumber(scenario.initialContextTokens)} starting context tok`
+  ].filter((fact): fact is string => Boolean(fact));
+
   return (
-    <section className="state-view state-view--ready" aria-labelledby="ready-title">
-      <div className="state-icon" aria-hidden="true">
-        <Gauge size={24} />
+    <section
+      className="state-view state-view--ready briefing"
+      aria-labelledby="ready-title"
+    >
+      <header className="briefing-heading">
+        <div>
+          <p className="state-kicker">
+            READY / {CONTROLLER_LABELS[controller].toUpperCase()}
+          </p>
+          <h2 id="ready-title">{scenario?.name ?? "No scenario available"}</h2>
+          {diffFacts.length > 0 && (
+            <p className="briefing-facts">{diffFacts.join(" / ")}</p>
+          )}
+        </div>
+        {scenario?.ceilingMicros !== undefined && (
+          <div className="briefing-budget" aria-label="Assigned budget">
+            <span>This job's budget</span>
+            <strong>{formatMoney(scenario.ceilingMicros)}</strong>
+            {scenario.finalReserveMicros !== undefined && (
+              <small>
+                {formatMoney(scenario.finalReserveMicros)} protected for the
+                final answer
+              </small>
+            )}
+          </div>
+        )}
+      </header>
+
+      {scenario?.signals?.length ? (
+        <div className="briefing-signals">
+          <h3>
+            <TriangleAlert size={15} aria-hidden="true" />
+            What makes this run expensive
+          </h3>
+          <ul>
+            {scenario.signals.map((signal) => (
+              <li key={signal}>{signal}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <div className="briefing-pipeline" aria-label="Admission pipeline">
+        <h3>
+          <ShieldCheck size={15} aria-hidden="true" />
+          Every model call clears this gate first
+        </h3>
+        <ol>
+          {ADMISSION_PIPELINE.map(({ step, detail }) => (
+            <li key={step}>
+              <strong>{step}</strong>
+              <span>{detail}</span>
+            </li>
+          ))}
+        </ol>
       </div>
-      <p className="state-kicker">READY</p>
-      <h2 id="ready-title">{scenario?.name ?? "No scenario available"}</h2>
-      <div className="ready-stages" aria-label="Run staging status">
-        <span>
-          <CheckCircle2 size={15} aria-hidden="true" />
-          Fixture-authored scenario
-        </span>
-        <span>
-          <CheckCircle2 size={15} aria-hidden="true" />
-          {CONTROLLER_LABELS[controller]}
-        </span>
-        <span>
-          <LockKeyhole size={15} aria-hidden="true" />
-          Scripted rubric outcome
-        </span>
-      </div>
+
+      <p className="briefing-cue">
+        <Play size={14} aria-hidden="true" />
+        Play the trace to watch the governor hold the ceiling.
+      </p>
     </section>
   );
 }
@@ -754,6 +831,17 @@ function TraceTimeline({
   totalEvents: number;
   isPlaying: boolean;
 }): React.JSX.Element {
+  const tailRef = useRef<HTMLLIElement | null>(null);
+
+  useEffect(() => {
+    if (isPlaying && events.length > 0) {
+      tailRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: "smooth"
+      });
+    }
+  }, [events.length, isPlaying]);
+
   return (
     <section className="timeline-panel" aria-labelledby="timeline-title">
       <header className="panel-heading">
@@ -775,7 +863,11 @@ function TraceTimeline({
           />
         ))}
         {isPlaying && (
-          <li className="timeline-pending" aria-label="Waiting for next event">
+          <li
+            className="timeline-pending"
+            aria-label="Waiting for next event"
+            ref={tailRef}
+          >
             <span aria-hidden="true">
               <RefreshCw className="spin" size={14} />
             </span>
@@ -888,6 +980,58 @@ function DecisionPanel({
         </span>
       </div>
     </aside>
+  );
+}
+
+function VerdictBanner({ trace }: { trace: RunTrace }): React.JSX.Element {
+  const ceiling = Math.max(1, trace.policy.ceilingMicros);
+  const settled = Math.max(0, trace.summary.settledMicros);
+  const headroom = ceiling - settled;
+  const passed = trace.quality.gate === "PASS";
+  const completed = trace.status === "COMPLETED";
+  const underCeiling = settled <= ceiling;
+  const success = completed && passed && underCeiling;
+
+  const title = success
+    ? "Delivered under budget"
+    : completed
+      ? underCeiling
+        ? "Under budget, but the review failed the quality gate"
+        : "Delivered, but the ceiling was exceeded"
+      : "Stopped by policy before delivery";
+  const detail = success
+    ? `The finished review settled at ${formatMoney(settled)}, leaving ` +
+      `${formatMoney(headroom)} of the ${formatMoney(ceiling)} ceiling unspent.`
+    : completed
+      ? `The run settled at ${formatMoney(settled)} against a ` +
+        `${formatMoney(ceiling)} ceiling.`
+      : `${formatMoney(settled)} was already spent when the ` +
+        `${CONTROLLER_LABELS[trace.controller].toLowerCase()} controller ` +
+        "stopped the job. No review was delivered.";
+
+  return (
+    <section
+      className={`verdict-banner ${success ? "is-pass" : "is-fail"}`}
+      aria-label="Run verdict"
+    >
+      <span className="verdict-icon" aria-hidden="true">
+        {success ? <CheckCircle2 size={26} /> : <XCircle size={26} />}
+      </span>
+      <div>
+        <h2>{title}</h2>
+        <p>{detail}</p>
+      </div>
+      <div className="verdict-figures">
+        <span>
+          Settled
+          <strong>{formatMoney(settled)}</strong>
+        </span>
+        <span>
+          Ceiling
+          <strong>{formatMoney(ceiling)}</strong>
+        </span>
+      </div>
+    </section>
   );
 }
 
@@ -1069,6 +1213,10 @@ function QualityComparison({
     1,
     ...orderedRows.map((row) => row.totalCostMicros)
   );
+  const hardCapRow = orderedRows.find((row) => row.controller === "hard_cap");
+  const staticRow = orderedRows.find((row) => row.controller === "static");
+  const showVerdict =
+    hardCapRow?.qualityGate === "FAIL" && staticRow?.qualityGate === "PASS";
 
   return (
     <section className="comparison-section" aria-labelledby="comparison-title">
@@ -1083,6 +1231,13 @@ function QualityComparison({
           predictive lift is unmeasured.
         </p>
       </header>
+      {showVerdict && hardCapRow && staticRow && (
+        <p className="comparison-verdict">
+          The hard cap burned {formatMoney(hardCapRow.totalCostMicros)} and
+          shipped nothing. The governed run shipped a passing review for{" "}
+          {formatMoney(staticRow.totalCostMicros)}.
+        </p>
+      )}
       <div className="comparison-grid">
         {orderedRows.map((row) => (
           <ComparisonArm key={row.controller} row={row} maxCost={maxCost} />
@@ -1118,6 +1273,16 @@ function TraceDashboard({
   const currentRisk = currentEvent?.risk ?? "SAFE";
   const isComplete = playbackStatus === "complete";
   const comparison = trace.comparison.length ? trace.comparison : benchmark;
+  const verdictRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (isComplete) {
+      verdictRef.current?.scrollIntoView({
+        block: "start",
+        behavior: "smooth"
+      });
+    }
+  }, [isComplete]);
 
   return (
     <div className="trace-dashboard">
@@ -1144,10 +1309,11 @@ function TraceDashboard({
       </div>
 
       {isComplete && (
-        <>
+        <div ref={verdictRef} className="verdict-region">
+          <VerdictBanner trace={trace} />
           <FinalReceipt trace={trace} isReplay={isReplay} />
           <QualityComparison rows={comparison} />
-        </>
+        </div>
       )}
     </div>
   );
@@ -1163,6 +1329,10 @@ function errorMessage(error: unknown): string {
   return "The request could not be completed.";
 }
 
+const STATION_CYCLE: Controller[] = ["hard_cap", "static"];
+const STATION_VERDICT_DWELL_MS = 9_000;
+const STATION_RETRY_MS = 12_000;
+
 export default function App(): React.JSX.Element {
   const [catalog, setCatalog] = useState<DemoCatalog | null>(null);
   const [catalogStatus, setCatalogStatus] =
@@ -1177,7 +1347,12 @@ export default function App(): React.JSX.Element {
   const [visibleCount, setVisibleCount] = useState(0);
   const [isReplay, setIsReplay] = useState(false);
   const [runError, setRunError] = useState("");
+  const [stationIndex, setStationIndex] = useState(0);
   const runAbortRef = useRef<AbortController | null>(null);
+  const stationMode = useMemo(
+    () => new URLSearchParams(window.location.search).has("station"),
+    []
+  );
 
   useEffect(() => {
     const abortController = new AbortController();
@@ -1257,11 +1432,16 @@ export default function App(): React.JSX.Element {
     setPlaybackStatus("empty");
   }, []);
 
-  const runDemo = useCallback(async (): Promise<void> => {
+  const runDemo = useCallback(
+    async (controllerOverride?: Controller): Promise<void> => {
     if (!scenarioId || catalogStatus !== "ready") {
       return;
     }
 
+    const activeController = controllerOverride ?? controller;
+    if (controllerOverride) {
+      setController(controllerOverride);
+    }
     runAbortRef.current?.abort();
     const abortController = new AbortController();
     runAbortRef.current = abortController;
@@ -1272,7 +1452,7 @@ export default function App(): React.JSX.Element {
     setPlaybackStatus("requesting");
 
     try {
-      const input = { scenarioId, controller };
+      const input = { scenarioId, controller: activeController };
       const response = await createDemoRun(
         input,
         abortController.signal
@@ -1290,7 +1470,46 @@ export default function App(): React.JSX.Element {
         runAbortRef.current = null;
       }
     }
-  }, [catalogStatus, controller, scenarioId]);
+    },
+    [catalogStatus, controller, scenarioId]
+  );
+
+  useEffect(() => {
+    if (!stationMode || catalogStatus !== "ready" || !scenarioId) {
+      return;
+    }
+
+    if (playbackStatus === "empty") {
+      const timer = window.setTimeout(() => {
+        void runDemo(STATION_CYCLE[stationIndex % STATION_CYCLE.length]);
+      }, 1_200);
+      return () => window.clearTimeout(timer);
+    }
+
+    if (playbackStatus === "complete") {
+      const timer = window.setTimeout(() => {
+        const next = stationIndex + 1;
+        setStationIndex(next);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        void runDemo(STATION_CYCLE[next % STATION_CYCLE.length]);
+      }, STATION_VERDICT_DWELL_MS);
+      return () => window.clearTimeout(timer);
+    }
+
+    if (playbackStatus === "error") {
+      const timer = window.setTimeout(() => {
+        void runDemo(STATION_CYCLE[stationIndex % STATION_CYCLE.length]);
+      }, STATION_RETRY_MS);
+      return () => window.clearTimeout(timer);
+    }
+  }, [
+    catalogStatus,
+    playbackStatus,
+    runDemo,
+    scenarioId,
+    stationIndex,
+    stationMode
+  ]);
 
   const pause = useCallback((): void => {
     setPlaybackStatus((current) =>
@@ -1401,6 +1620,7 @@ export default function App(): React.JSX.Element {
       <AppHeader
         catalogStatus={catalogStatus}
         playbackStatus={playbackStatus}
+        stationMode={stationMode}
       />
       <main className="dashboard-main">
         <CommandBand

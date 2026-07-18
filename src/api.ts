@@ -46,6 +46,12 @@ export type ScenarioSummary = {
   description: string;
   repository?: string;
   pullRequest?: string;
+  changedFiles?: number;
+  changedLines?: number;
+  initialContextTokens?: number;
+  ceilingMicros?: number;
+  finalReserveMicros?: number;
+  signals?: string[];
 };
 
 export type CostRange = {
@@ -167,6 +173,14 @@ type DetailedScenario = {
   summary: string;
   repository?: string;
   pullRequestNumber?: number;
+  changedFiles?: number;
+  changedLines?: number;
+  initialContextTokens?: number;
+  signals?: string[];
+  taskPolicy?: {
+    applicationCeilingMicroUsd?: number;
+    protectedFinalReserveMicroUsd?: number;
+  };
 };
 
 type DetailedBenchmarkRow = {
@@ -414,6 +428,13 @@ function toScenario(value: unknown): ScenarioSummary {
     throw new ApiError("Catalog scenario is missing its title or summary.");
   }
 
+  const optionalCount = (candidate: unknown): number | undefined =>
+    typeof candidate === "number" &&
+    Number.isSafeInteger(candidate) &&
+    candidate >= 0
+      ? candidate
+      : undefined;
+
   return {
     id: detailed.id,
     name: detailed.title,
@@ -422,7 +443,21 @@ function toScenario(value: unknown): ScenarioSummary {
     pullRequest:
       typeof detailed.pullRequestNumber === "number"
         ? `PR #${detailed.pullRequestNumber}`
-        : undefined
+        : undefined,
+    changedFiles: optionalCount(detailed.changedFiles),
+    changedLines: optionalCount(detailed.changedLines),
+    initialContextTokens: optionalCount(detailed.initialContextTokens),
+    ceilingMicros: optionalCount(
+      detailed.taskPolicy?.applicationCeilingMicroUsd
+    ),
+    finalReserveMicros: optionalCount(
+      detailed.taskPolicy?.protectedFinalReserveMicroUsd
+    ),
+    signals: Array.isArray(detailed.signals)
+      ? detailed.signals.filter(
+          (signal): signal is string => typeof signal === "string"
+        )
+      : undefined
   };
 }
 
