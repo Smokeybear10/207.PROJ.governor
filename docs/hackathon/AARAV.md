@@ -66,6 +66,12 @@ governor API without leaving the editor.
 - [x] Restore `server/artifacts/` swallowed by `.gitignore`
 - [x] Hackathon announcements + strategy docs
 - [x] Intervention checklist (docs/hackathon/INTERVENTIONS.md)
+- [x] CLI/API demo station-ready: found and documented that
+      `/v1/jobs/:id/responses` fails closed without `OPENAI_API_KEY`
+      (real risk to Screen 1). Built `station/rehearsal-server.ts` +
+      `station/run-demo.sh` (`npm run station:demo`) as a scripted-provider
+      fallback so the full job create -> response -> finalize -> receipt
+      loop can be rehearsed and demoed with no key. Verified end to end.
 - Dashboard work is handed off; no more dashboard changes from Aarav.
 
 ### 3. Stretch — reassign, don't duplicate

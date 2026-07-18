@@ -74,6 +74,16 @@ See docs/hackathon/AARAV.md for the granular list.
 
 ## Demo plan (station)
 
+**Risk found:** without `OPENAI_API_KEY` set, `/v1/jobs/:id/responses` fails
+closed with `PROVIDER_NOT_CONFIGURED` — verified live. Job create and job
+show work with no key; the actual governed-response step does not. If
+Aryan's live-key run isn't solid by showtime, Screen 1 breaks mid-demo.
+Fallback: `npm run station:demo` runs the full job create -> response
+create -> finalize -> receipt loop against a scripted provider (real
+ledger, real rate card, fake model call) with no key needed. Use the live
+key run for the actual pitch whenever it's ready; this is a rehearsal/
+backup path, not a replacement — see `station/rehearsal-server.ts`.
+
 1. Screen 1: terminal. Create a job with a $0.075 budget, submit work through
    the governor, show the receipt.
 2. Screen 2 (VS Code): same job's spend and risk band live in the status bar;
