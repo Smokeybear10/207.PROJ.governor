@@ -32,6 +32,7 @@ export type QualityGateStatus = "PASSED" | "FAILED";
 
 export interface DemoProvenance {
   readonly origin: "SYNTHETIC_DETERMINISTIC_FIXTURE";
+  readonly governorCore: "GOVERNOR_CORE_ENFORCED";
   readonly externalApiCalls: 0;
   readonly usageSource: "SIMULATED";
   readonly costBasis: "SIMULATED_LIST_PRICE_MICRO_USD";
@@ -45,12 +46,12 @@ export interface DemoRateCard {
   readonly processingRegion: "global";
   readonly currency: "USD";
   readonly unit: "USD_PER_MILLION_TOKENS";
-  readonly uncachedInputUsdPerMillionTokens: 0.75;
-  readonly cachedInputUsdPerMillionTokens: 0.075;
-  readonly outputUsdPerMillionTokens: 4.5;
-  readonly uncachedInputMicroUsdPerMillionTokens: 750_000;
-  readonly cachedInputMicroUsdPerMillionTokens: 75_000;
-  readonly outputMicroUsdPerMillionTokens: 4_500_000;
+  readonly uncachedInputUsdPerMillionTokens: number;
+  readonly cachedInputUsdPerMillionTokens: number;
+  readonly outputUsdPerMillionTokens: number;
+  readonly uncachedInputMicroUsdPerMillionTokens: number;
+  readonly cachedInputMicroUsdPerMillionTokens: number;
+  readonly outputMicroUsdPerMillionTokens: number;
   readonly rounding: "CEIL_EACH_AGGREGATE_CHARGE";
   readonly source: "PINNED_STANDARD_PRICING_FOR_DEMO";
   readonly disclosure: string;
@@ -61,6 +62,8 @@ export interface DemoTaskPolicy {
   readonly name: "Routine PR Review";
   readonly applicationCeilingMicroUsd: number;
   readonly protectedFinalReserveMicroUsd: number;
+  readonly finalAnswerInputTokenLimit: number;
+  readonly minimumFinalOutputTokens: number;
   readonly maxResponses: number;
   readonly maxEquivalentRetries: number;
   readonly rateCardVersion: typeof DEMO_RATE_CARD_VERSION;
@@ -157,12 +160,22 @@ export interface ObservedRiskDriver {
 
 export interface EventRiskSnapshot {
   readonly band: RiskBand;
+  readonly engine: "GOVERNOR_CORE";
   readonly mode: "ENFORCED" | "SHADOW";
   readonly source:
     | "DETERMINISTIC_BOUND"
     | "STATIC_RULES"
     | "SHADOW_FORECAST";
   readonly observedDrivers: readonly ObservedRiskDriver[];
+}
+
+export interface DemoRequestAdmission {
+  readonly requestId: string;
+  readonly phase: "work" | "final";
+  readonly exactInputTokens: number;
+  readonly requestedMaxOutputTokens: number;
+  readonly minimumUsefulOutputTokens: number;
+  readonly admittedMaxOutputTokens: number;
 }
 
 export interface DemoArtifact {
@@ -240,6 +253,7 @@ export interface RunEvent {
   readonly detail: string;
   readonly metrics: EventMetricsSnapshot;
   readonly risk: EventRiskSnapshot;
+  readonly requestAdmission?: DemoRequestAdmission;
   readonly action?: InterventionAction;
   readonly syntheticReceipt?: SyntheticCostReceipt;
 }

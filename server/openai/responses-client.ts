@@ -50,6 +50,7 @@ export type ProviderUsage = {
 export type TerminalResponse = {
   id: string;
   model: string;
+  providerModel?: string;
   serviceTier: "default";
   status: ResponseStatus;
   output: unknown[];
@@ -61,6 +62,7 @@ export class OpenAiApiError extends Error {
   readonly status: number;
   readonly requestId?: string;
   readonly ambiguous: boolean;
+  readonly protocolError: boolean;
 
   constructor(
     message: string,
@@ -68,6 +70,7 @@ export class OpenAiApiError extends Error {
       status?: number;
       requestId?: string;
       ambiguous?: boolean;
+      protocolError?: boolean;
       cause?: unknown;
     } = {}
   ) {
@@ -76,6 +79,7 @@ export class OpenAiApiError extends Error {
     this.status = options.status ?? 0;
     this.requestId = options.requestId;
     this.ambiguous = options.ambiguous ?? false;
+    this.protocolError = options.protocolError ?? false;
   }
 }
 
@@ -129,31 +133,59 @@ function normalizeUsage(value: unknown): ProviderUsage | null {
       ? (usage.output_tokens_details as JsonObject)
       : {};
 
+  const inputTokens = requireNonNegativeInteger(
+    usage.input_tokens,
+    "usage.input_tokens"
+  );
+  const cachedInputTokens = requireNonNegativeInteger(
+    inputDetails.cached_tokens ?? 0,
+    "usage.input_tokens_details.cached_tokens"
+  );
+  const cacheWriteInputTokens = requireNonNegativeInteger(
+    inputDetails.cache_write_tokens ?? 0,
+    "usage.input_tokens_details.cache_write_tokens"
+  );
+  const outputTokens = requireNonNegativeInteger(
+    usage.output_tokens,
+    "usage.output_tokens"
+  );
+  const reasoningOutputTokens = requireNonNegativeInteger(
+    outputDetails.reasoning_tokens ?? 0,
+    "usage.output_tokens_details.reasoning_tokens"
+  );
+  const totalTokens = requireNonNegativeInteger(
+    usage.total_tokens,
+    "usage.total_tokens"
+  );
+
+  if (
+    BigInt(cachedInputTokens) + BigInt(cacheWriteInputTokens) >
+    BigInt(inputTokens)
+  ) {
+    throw new OpenAiApiError(
+      "OpenAI returned usage input partitions that exceed input_tokens."
+    );
+  }
+  if (reasoningOutputTokens > outputTokens) {
+    throw new OpenAiApiError(
+      "OpenAI returned reasoning tokens that exceed output_tokens."
+    );
+  }
+  if (
+    BigInt(totalTokens) !== BigInt(inputTokens) + BigInt(outputTokens)
+  ) {
+    throw new OpenAiApiError(
+      "OpenAI returned total_tokens inconsistent with input and output tokens."
+    );
+  }
+
   return {
-    inputTokens: requireNonNegativeInteger(
-      usage.input_tokens,
-      "usage.input_tokens"
-    ),
-    cachedInputTokens: requireNonNegativeInteger(
-      inputDetails.cached_tokens ?? 0,
-      "usage.input_tokens_details.cached_tokens"
-    ),
-    cacheWriteInputTokens: requireNonNegativeInteger(
-      inputDetails.cache_write_tokens ?? 0,
-      "usage.input_tokens_details.cache_write_tokens"
-    ),
-    outputTokens: requireNonNegativeInteger(
-      usage.output_tokens,
-      "usage.output_tokens"
-    ),
-    reasoningOutputTokens: requireNonNegativeInteger(
-      outputDetails.reasoning_tokens ?? 0,
-      "usage.output_tokens_details.reasoning_tokens"
-    ),
-    totalTokens: requireNonNegativeInteger(
-      usage.total_tokens,
-      "usage.total_tokens"
-    )
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens
   };
 }
 
@@ -169,6 +201,30 @@ function normalizeStatus(value: unknown): ResponseStatus {
     throw new OpenAiApiError("OpenAI returned an unknown response status.");
   }
   return value;
+}
+
+function normalizeResponseModel(
+  requestedModel: string,
+  providerModel: string
+): { model: string; providerModel?: string } {
+  if (providerModel === requestedModel) {
+    return { model: requestedModel };
+  }
+
+  const escapedRequestedModel = requestedModel.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&"
+  );
+  const datedSnapshot = new RegExp(
+    `^${escapedRequestedModel}-\\d{4}-\\d{2}-\\d{2}$`
+  );
+  if (datedSnapshot.test(providerModel)) {
+    return { model: requestedModel, providerModel };
+  }
+
+  throw new OpenAiApiError(
+    "OpenAI returned a model outside the requested alias."
+  );
 }
 
 function assertContext(context: ResponseContext): void {
@@ -190,6 +246,11 @@ function assertContext(context: ResponseContext): void {
 
 function assertGovernedRequest(request: GovernedResponseRequest): void {
   assertContext(request);
+  if (request.previous_response_id !== undefined) {
+    throw new OpenAiApiError(
+      "Governed responses must not use previous_response_id."
+    );
+  }
   if (
     !Number.isSafeInteger(request.max_output_tokens) ||
     request.max_output_tokens < 1
@@ -316,8 +377,10 @@ function protocolErrorFromResponse(
         : "OpenAI returned an invalid response body.";
 
   return new OpenAiApiError(message, {
+    status: response.status,
     requestId: response.headers.get("x-request-id") ?? undefined,
     ambiguous,
+    protocolError: true,
     cause: error
   });
 }
@@ -331,6 +394,7 @@ function requireJsonObject(value: unknown, label: string): JsonObject {
 
 async function errorFromResponse(response: Response): Promise<OpenAiApiError> {
   const requestId = response.headers.get("x-request-id") ?? undefined;
+  const ambiguous = response.status === 408 || response.status >= 500;
   let providerMessage = "";
 
   try {
@@ -350,19 +414,29 @@ async function errorFromResponse(response: Response): Promise<OpenAiApiError> {
     if (error instanceof ResponseBodyError && error.kind === "too_large") {
       return new OpenAiApiError(
         `OpenAI request failed with status ${response.status}; the error body exceeded the 8 MiB limit.`,
-        { status: response.status, requestId, cause: error }
+        {
+          status: response.status,
+          requestId,
+          ambiguous,
+          cause: error
+        }
       );
     }
     // The HTTP status remains useful when the provider body is not JSON.
     return new OpenAiApiError(
       `OpenAI request failed with status ${response.status}.`,
-      { status: response.status, requestId, cause: error }
+      {
+        status: response.status,
+        requestId,
+        ambiguous,
+        cause: error
+      }
     );
   }
 
   return new OpenAiApiError(
     providerMessage || `OpenAI request failed with status ${response.status}.`,
-    { status: response.status, requestId }
+    { status: response.status, requestId, ambiguous }
   );
 }
 
@@ -434,9 +508,13 @@ export class OpenAiResponsesClient {
         );
       }
 
+      const normalizedModel = normalizeResponseModel(
+        request.model,
+        body.model
+      );
       return {
         id: body.id,
-        model: body.model,
+        ...normalizedModel,
         serviceTier: "default",
         status: normalizeStatus(body.status),
         output: body.output,

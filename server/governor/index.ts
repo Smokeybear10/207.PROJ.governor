@@ -34,6 +34,7 @@ export {
   type GovernorPolicy,
   type LedgerSnapshot,
   type ProviderReconciliation,
+  type ProviderRejectionEvidence,
   type ProviderResponseEvidence,
   type ProviderTerminalStatus,
   type ProviderUsageObservation,
@@ -54,7 +55,9 @@ export {
 } from "./log-reducer.js";
 export {
   DEFAULT_RISK_THRESHOLDS,
+  assessLedgerRisk,
   assessRisk,
+  type LedgerRiskSignals,
   type RiskAssessment,
   type RiskBand,
   type RiskDriver,

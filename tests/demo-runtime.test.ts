@@ -10,6 +10,11 @@ import {
   type RunTrace,
   type SyntheticCostReceipt
 } from "../server/demo/index.js";
+import {
+  GPT_5_4_MINI_STANDARD_RATE_CARD,
+  calculateUsageCost,
+  calculateWorstCaseRequestCost
+} from "../server/governor/index.js";
 
 function allRuns(): RunTrace[] {
   return getDemoCatalog().scenarios.flatMap((scenario) =>
@@ -19,17 +24,15 @@ function allRuns(): RunTrace[] {
   );
 }
 
-function ceilPrice(tokens: number, rate: number): number {
-  const numerator = BigInt(tokens) * BigInt(rate);
-  return Number((numerator + 999_999n) / 1_000_000n);
-}
-
 function expectedReceiptTotal(receipt: SyntheticCostReceipt): number {
-  return (
-    ceilPrice(receipt.usage.uncachedInputTokens, 750_000) +
-    ceilPrice(receipt.usage.cachedInputTokens, 75_000) +
-    ceilPrice(receipt.usage.outputTokens, 4_500_000)
-  );
+  return calculateUsageCost(GPT_5_4_MINI_STANDARD_RATE_CARD, {
+    inputTokens:
+      receipt.usage.uncachedInputTokens +
+      receipt.usage.cachedInputTokens,
+    cachedInputTokens: receipt.usage.cachedInputTokens,
+    outputTokens: receipt.usage.outputTokens,
+    usageSource: "provider"
+  }).totalMicroUsd;
 }
 
 describe("deterministic demo catalog", () => {
@@ -53,6 +56,7 @@ describe("deterministic demo catalog", () => {
       conclusion: "SHADOW_INCREMENTAL_VALUE_NOT_ESTABLISHED",
       provenance: {
         origin: "SYNTHETIC_DETERMINISTIC_FIXTURE",
+        governorCore: "GOVERNOR_CORE_ENFORCED",
         externalApiCalls: 0,
         usageSource: "SIMULATED"
       }
@@ -102,6 +106,9 @@ describe("demo trace invariants", () => {
       expect(run.mode).toBe("DEMO");
       expect(run.truthLabel).toBe(DEMO_TRUTH_LABEL);
       expect(run.provenance.externalApiCalls).toBe(0);
+      expect(run.provenance.governorCore).toBe(
+        "GOVERNOR_CORE_ENFORCED"
+      );
       expect(run.provenance.usageSource).toBe("SIMULATED");
       expect(run.rateCard.version).toBe(DEMO_RATE_CARD_VERSION);
       expect(run.taskPolicy.rateCardVersion).toBe(DEMO_RATE_CARD_VERSION);
@@ -136,6 +143,7 @@ describe("demo trace invariants", () => {
           priorOutput
         );
         expect(event.risk.observedDrivers.length).toBeGreaterThan(0);
+        expect(event.risk.engine).toBe("GOVERNOR_CORE");
 
         priorOffset = event.offsetMs;
         priorSettled = event.metrics.settledMicroUsd;
@@ -209,6 +217,69 @@ describe("demo trace invariants", () => {
       expect(run.syntheticReceipts).toEqual(eventReceipts);
       expect(cumulativeSettled).toBe(run.finalSummary.settledMicroUsd);
     }
+  });
+
+  it("derives every visible reservation from governor admission", () => {
+    for (const run of allRuns()) {
+      const boundedFinalCost = calculateWorstCaseRequestCost(
+        GPT_5_4_MINI_STANDARD_RATE_CARD,
+        run.taskPolicy.finalAnswerInputTokenLimit,
+        run.taskPolicy.minimumFinalOutputTokens
+      ).totalMicroUsd;
+      expect(
+        run.taskPolicy.protectedFinalReserveMicroUsd
+      ).toBeGreaterThanOrEqual(boundedFinalCost);
+
+      const admissions = run.events.filter(
+        (event) => event.requestAdmission !== undefined
+      );
+      for (const event of admissions) {
+        const request = event.requestAdmission!;
+        const expectedReservation = calculateWorstCaseRequestCost(
+          GPT_5_4_MINI_STANDARD_RATE_CARD,
+          request.exactInputTokens,
+          request.admittedMaxOutputTokens
+        ).totalMicroUsd;
+
+        expect(request.admittedMaxOutputTokens).toBeLessThanOrEqual(
+          request.requestedMaxOutputTokens
+        );
+        expect(request.admittedMaxOutputTokens).toBeGreaterThanOrEqual(
+          request.minimumUsefulOutputTokens
+        );
+        expect(event.metrics.reservedMicroUsd).toBe(expectedReservation);
+        expect(event.metrics.finalReserveMicroUsd).toBe(
+          request.phase === "work"
+            ? run.taskPolicy.protectedFinalReserveMicroUsd
+            : 0
+        );
+      }
+
+      expect(
+        run.events.filter((event) => event.syntheticReceipt)
+      ).toHaveLength(admissions.length);
+      expect(run.events.at(-1)!.metrics).toMatchObject({
+        reservedMicroUsd: 0,
+        finalReserveMicroUsd: 0
+      });
+      expect(run.events.at(-1)!.risk.band).toBe("SAFE");
+    }
+  });
+
+  it("shows the core reducing an unaffordable output cap", () => {
+    const run = createDemoRun({
+      scenarioId: "large-failing-log",
+      controller: "static"
+    });
+    const continuation = run.events.find(
+      (event) => event.title === "Reduced continuation admitted"
+    )!.requestAdmission!;
+
+    expect(continuation).toMatchObject({
+      requestedMaxOutputTokens: 5_000,
+      admittedMaxOutputTokens: 3_384,
+      minimumUsefulOutputTokens: 1_800
+    });
   });
 });
 

@@ -9,11 +9,13 @@ export {
   PrReviewToolbox,
   createPrReviewToolDispatcher,
   createReviewToolbox,
+  validatePrReviewToolCall,
   type OpenAiFunctionToolDefinition,
   type PrReviewSnapshot,
   type PrReviewToolDispatcher,
   type PrReviewToolErrorCode,
   type PrReviewToolName,
+  type ValidatedPrReviewToolArguments,
   type ReviewToolbox
 } from "./tools.js";
 export {

@@ -4,6 +4,7 @@ import {
   requirePositiveSafeInteger,
   safeIntegerFromBigInt
 } from "./errors.js";
+import type { LedgerSnapshot } from "./ledger.js";
 
 const BASIS_POINTS = 10_000n;
 
@@ -62,6 +63,14 @@ export interface RiskAssessment {
   readonly committedMicroUsd: number;
   readonly remainingUncommittedMicroUsd: number;
   readonly drivers: readonly RiskDriver[];
+}
+
+export interface LedgerRiskSignals {
+  readonly minimumCompletionCostMicroUsd: number;
+  readonly baselineContextTokens: number;
+  readonly currentContextTokens: number;
+  readonly equivalentRetryCount: number;
+  readonly failedToolCalls: number;
 }
 
 function meetsRatio(
@@ -269,5 +278,63 @@ export function assessRisk(
     committedMicroUsd,
     remainingUncommittedMicroUsd,
     drivers: Object.freeze(drivers)
+  });
+}
+
+export function assessLedgerRisk(
+  snapshot: LedgerSnapshot,
+  signals: LedgerRiskSignals,
+  thresholds: RiskThresholds = DEFAULT_RISK_THRESHOLDS
+): RiskAssessment {
+  assertGovernor(
+    typeof snapshot === "object" && snapshot !== null,
+    "INVALID_ARGUMENT",
+    "A ledger snapshot is required."
+  );
+  assertGovernor(
+    typeof signals === "object" && signals !== null,
+    "INVALID_ARGUMENT",
+    "Ledger risk signals are required."
+  );
+
+  const finalReserveStillAvailable =
+    !snapshot.closed &&
+    snapshot.pendingFinalValidationRequestId === null &&
+    snapshot.activeReservation?.phase !== "final" &&
+    snapshot.responsesStarted < snapshot.policy.maxResponses;
+
+  const assessment = assessRisk(
+    {
+      applicationCeilingMicroUsd:
+        snapshot.policy.applicationCeilingMicroUsd,
+      settledMicroUsd: snapshot.settledMicroUsd,
+      outstandingReservationMicroUsd:
+        snapshot.outstandingReservedMicroUsd,
+      protectedFinalAnswerReserveMicroUsd: finalReserveStillAvailable
+        ? snapshot.policy.finalAnswerReserveMicroUsd
+        : 0,
+      minimumCompletionCostMicroUsd:
+        signals.minimumCompletionCostMicroUsd,
+      baselineContextTokens: signals.baselineContextTokens,
+      currentContextTokens: signals.currentContextTokens,
+      equivalentRetryCount: signals.equivalentRetryCount,
+      maxEquivalentRetries: snapshot.policy.maxEquivalentRetries,
+      failedToolCalls: signals.failedToolCalls,
+      remainingResponses: Math.max(
+        0,
+        snapshot.policy.maxResponses - snapshot.responsesStarted
+      )
+    },
+    thresholds
+  );
+
+  if (!snapshot.closed) {
+    return assessment;
+  }
+
+  return Object.freeze({
+    ...assessment,
+    band: "SAFE" as const,
+    drivers: Object.freeze([])
   });
 }

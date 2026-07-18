@@ -5,6 +5,11 @@ export const MAX_OUTPUT_DEPTH = 64;
 export const MAX_OUTPUT_NODES = 10_000;
 export const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 export const MAX_ARGUMENT_BYTES = 64 * 1024;
+export const MAX_FINAL_FINDINGS = 50;
+export const MAX_FINAL_CATEGORY_BYTES = 128;
+export const MAX_FINAL_PATH_BYTES = 1_024;
+export const MAX_FINAL_EXPLANATION_BYTES = 4 * 1024;
+export const MAX_FINAL_MITIGATION_BYTES = 4 * 1024;
 
 export class ResponseOutputError extends Error {
   constructor(message: string) {
@@ -32,6 +37,32 @@ export type ParsedWorkOutput =
       readonly text: string;
       readonly replayItems: readonly JsonObject[];
     };
+
+export type FinalFindingSeverity = "P0" | "P1" | "P2" | "P3";
+
+export type ParsedFinalFinding = {
+  readonly category: string;
+  readonly severity: FinalFindingSeverity;
+  readonly path: string;
+  readonly start_line: number;
+  readonly end_line: number;
+  readonly explanation: string;
+  readonly suggested_mitigation: string;
+};
+
+export type ParsedFinalReview =
+  | {
+      readonly status: "clean";
+    }
+  | {
+      readonly status: "findings";
+      readonly findings: readonly ParsedFinalFinding[];
+    };
+
+export type ParsedFinalOutput = {
+  readonly text: string;
+  readonly review: ParsedFinalReview;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -206,6 +237,51 @@ function requireString(
   return value;
 }
 
+function requireBoundedString(
+  record: Record<string, unknown>,
+  field: string,
+  label: string,
+  maximumBytes: number
+): string {
+  const value = requireString(record, field, label).trim();
+  if (Buffer.byteLength(value, "utf8") > maximumBytes) {
+    throw new ResponseOutputError(
+      `${label} ${field} exceeds ${maximumBytes} UTF-8 bytes.`
+    );
+  }
+  return value;
+}
+
+function requireExactFields(
+  record: Record<string, unknown>,
+  fields: readonly string[],
+  label: string
+): void {
+  const expected = new Set(fields);
+  if (
+    Object.keys(record).length !== expected.size ||
+    Object.keys(record).some((field) => !expected.has(field))
+  ) {
+    throw new ResponseOutputError(
+      `${label} must contain exactly: ${fields.join(", ")}.`
+    );
+  }
+}
+
+function requirePositiveSafeInteger(
+  record: Record<string, unknown>,
+  field: string,
+  label: string
+): number {
+  const value = record[field];
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new ResponseOutputError(
+      `${label} ${field} must be a positive safe integer.`
+    );
+  }
+  return value as number;
+}
+
 function parseArguments(rawArguments: string): JsonObject {
   if (Buffer.byteLength(rawArguments, "utf8") > MAX_ARGUMENT_BYTES) {
     throw new ResponseOutputError("Function-call arguments are too large.");
@@ -247,14 +323,7 @@ function inspectOutput(output: unknown[]): {
 
     if (item.type === "reasoning") {
       requireString(item, "id", "Reasoning item");
-      if (
-        item.encrypted_content !== undefined &&
-        typeof item.encrypted_content !== "string"
-      ) {
-        throw new ResponseOutputError(
-          "Reasoning encrypted_content must be a string."
-        );
-      }
+      requireString(item, "encrypted_content", "Reasoning item");
       continue;
     }
 
@@ -367,4 +436,135 @@ export function extractFinalText(output: unknown[]): string {
     throw new ResponseOutputError("The final response text is empty.");
   }
   return inspected.text;
+}
+
+function parseFinalFinding(
+  value: unknown,
+  index: number
+): ParsedFinalFinding {
+  const label = `Final finding ${index + 1}`;
+  if (!isRecord(value)) {
+    throw new ResponseOutputError(`${label} must be a JSON object.`);
+  }
+  requireExactFields(
+    value,
+    [
+      "category",
+      "severity",
+      "path",
+      "start_line",
+      "end_line",
+      "explanation",
+      "suggested_mitigation"
+    ],
+    label
+  );
+
+  const severity = value.severity;
+  if (
+    severity !== "P0" &&
+    severity !== "P1" &&
+    severity !== "P2" &&
+    severity !== "P3"
+  ) {
+    throw new ResponseOutputError(
+      `${label} severity must be P0, P1, P2, or P3.`
+    );
+  }
+  const startLine = requirePositiveSafeInteger(
+    value,
+    "start_line",
+    label
+  );
+  const endLine = requirePositiveSafeInteger(value, "end_line", label);
+  if (startLine > endLine) {
+    throw new ResponseOutputError(
+      `${label} start_line must be less than or equal to end_line.`
+    );
+  }
+
+  return Object.freeze({
+    category: requireBoundedString(
+      value,
+      "category",
+      label,
+      MAX_FINAL_CATEGORY_BYTES
+    ),
+    severity,
+    path: requireBoundedString(
+      value,
+      "path",
+      label,
+      MAX_FINAL_PATH_BYTES
+    ),
+    start_line: startLine,
+    end_line: endLine,
+    explanation: requireBoundedString(
+      value,
+      "explanation",
+      label,
+      MAX_FINAL_EXPLANATION_BYTES
+    ),
+    suggested_mitigation: requireBoundedString(
+      value,
+      "suggested_mitigation",
+      label,
+      MAX_FINAL_MITIGATION_BYTES
+    )
+  });
+}
+
+function parseFinalReviewText(text: string): ParsedFinalReview {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new ResponseOutputError(
+      "The final response text must be valid JSON."
+    );
+  }
+  assertBoundedJson(parsed, "Final review");
+  if (!isRecord(parsed)) {
+    throw new ResponseOutputError(
+      "The final review must be a JSON object."
+    );
+  }
+
+  if (parsed.status === "clean") {
+    requireExactFields(parsed, ["status"], "Clean final review");
+    return Object.freeze({ status: "clean" as const });
+  }
+  if (parsed.status !== "findings") {
+    throw new ResponseOutputError(
+      'The final review status must be "clean" or "findings".'
+    );
+  }
+  requireExactFields(
+    parsed,
+    ["status", "findings"],
+    "Findings final review"
+  );
+  if (
+    !Array.isArray(parsed.findings) ||
+    parsed.findings.length === 0 ||
+    parsed.findings.length > MAX_FINAL_FINDINGS
+  ) {
+    throw new ResponseOutputError(
+      `A findings final review must contain 1-${MAX_FINAL_FINDINGS} findings.`
+    );
+  }
+  return Object.freeze({
+    status: "findings" as const,
+    findings: Object.freeze(parsed.findings.map(parseFinalFinding))
+  });
+}
+
+export function parseFinalReviewOutput(
+  output: unknown[]
+): ParsedFinalOutput {
+  const text = extractFinalText(output);
+  return Object.freeze({
+    text,
+    review: parseFinalReviewText(text)
+  });
 }

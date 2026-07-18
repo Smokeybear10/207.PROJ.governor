@@ -185,16 +185,16 @@ function AppHeader({
   return (
     <header className="app-header">
       <div className="header-inner">
-        <div className="brand-lockup" aria-label="TokenGovernor">
+        <div className="brand-lockup" aria-label="Governor">
           <span className="brand-mark" aria-hidden="true">
-            <ShieldCheck size={20} strokeWidth={2.2} />
+            <img src="/brand/governor-mark.svg" alt="" />
           </span>
-          <span className="brand-name">TokenGovernor</span>
-          <span className="brand-context">Operations</span>
+          <span className="brand-name">Governor</span>
+          <span className="brand-context">Execution control</span>
         </div>
         <div className="truth-strip" aria-label="Data provenance and run state">
           <span className="truth-badge">
-            SCRIPTED FIXTURE / 0 EXTERNAL CALLS
+            GOVERNOR CORE / SCRIPTED INPUTS / 0 EXTERNAL CALLS
           </span>
           <span
             className={`operation-status operation-status--${playbackStatus}`}
@@ -220,6 +220,7 @@ function TruthDisclosure({
     <div className="truth-disclosure" aria-label={label} title={truth.truthLabel}>
       <p>
         <strong>{truth.provenance.origin}</strong>
+        <span>{truth.provenance.governorCore}</span>
         <span>{truth.provenance.usageSource} usage</span>
         <span>{truth.provenance.costBasis}</span>
       </p>
@@ -523,7 +524,7 @@ function AccountingBand({
           <h2 id="accounting-title">{trace.scenario.name}</h2>
         </div>
         <div className="run-identity">
-          <span>{isReplay ? "SCRIPTED REPLAY" : "SCRIPTED FIXTURE"}</span>
+          <span>{isReplay ? "CORE REPLAY" : "CORE-ENFORCED FIXTURE"}</span>
           <span>{statusLabel}</span>
           <code>{trace.id}</code>
         </div>
@@ -648,6 +649,21 @@ function TimelineEvent({
               {formatNumber(event.metrics.outputTokens)}
             </dd>
           </div>
+          {event.requestAdmission && (
+            <div className="event-metrics__admission">
+              <dt>Core output cap</dt>
+              <dd>
+                {formatNumber(
+                  event.requestAdmission.admittedMaxOutputTokens
+                )}{" "}
+                /{" "}
+                {formatNumber(
+                  event.requestAdmission.requestedMaxOutputTokens
+                )}{" "}
+                tok
+              </dd>
+            </div>
+          )}
         </dl>
         {action && (
           <div className={`event-action event-action--${action.mode}`}>
@@ -862,8 +878,8 @@ function FinalReceipt({
           <dt>Trace provenance</dt>
           <dd>
             {isReplay
-              ? "SCRIPTED REPLAY / 0 EXTERNAL CALLS"
-              : "SCRIPTED FIXTURE / 0 EXTERNAL CALLS"}
+              ? "GOVERNOR CORE REPLAY / 0 EXTERNAL CALLS"
+              : "GOVERNOR CORE / SCRIPTED INPUTS / 0 EXTERNAL CALLS"}
           </dd>
         </div>
       </dl>
@@ -1274,7 +1290,7 @@ export default function App(): React.JSX.Element {
         {content}
       </main>
       <footer className="app-footer">
-        <span>TokenGovernor POC</span>
+        <span>Governor POC</span>
         <span>Pinned synthetic list-price calculations. Not billed.</span>
       </footer>
     </div>

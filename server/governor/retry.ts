@@ -187,7 +187,7 @@ export class RetryFingerprintTracker {
     if (priorOccurrences === 0) {
       state = materialChange ? "MATERIAL_CHANGE" : "FIRST_FAILURE";
     } else if (
-      equivalentRetryCount >= this.#maxEquivalentRetries
+      equivalentRetryCount > this.#maxEquivalentRetries
     ) {
       state = "LIMIT_REACHED";
     } else {
@@ -201,7 +201,7 @@ export class RetryFingerprintTracker {
       equivalentRetryCount,
       occurrencesForFingerprint,
       retryAllowed:
-        equivalentRetryCount < this.#maxEquivalentRetries
+        equivalentRetryCount <= this.#maxEquivalentRetries
     });
   }
 }

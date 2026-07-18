@@ -11,28 +11,43 @@ import {
   type RunStatus,
   DEMO_RATE_CARD_VERSION
 } from "./types.js";
+import {
+  GPT_5_4_MINI_STANDARD_RATE_CARD,
+  type JsonValue
+} from "../governor/index.js";
 
 export const DEMO_PROVENANCE: DemoProvenance = {
   origin: "SYNTHETIC_DETERMINISTIC_FIXTURE",
+  governorCore: "GOVERNOR_CORE_ENFORCED",
   externalApiCalls: 0,
   usageSource: "SIMULATED",
   costBasis: "SIMULATED_LIST_PRICE_MICRO_USD"
 };
 
+const CORE_RATES = GPT_5_4_MINI_STANDARD_RATE_CARD.rates;
+
 export const DEMO_RATE_CARD: DemoRateCard = {
   version: DEMO_RATE_CARD_VERSION,
-  provider: "openai",
-  model: "gpt-5.4-mini",
-  serviceTier: "standard",
-  processingRegion: "global",
+  provider: GPT_5_4_MINI_STANDARD_RATE_CARD.provider as "openai",
+  model: GPT_5_4_MINI_STANDARD_RATE_CARD.model as "gpt-5.4-mini",
+  serviceTier:
+    GPT_5_4_MINI_STANDARD_RATE_CARD.serviceTier as "standard",
+  processingRegion:
+    GPT_5_4_MINI_STANDARD_RATE_CARD.processingRegion as "global",
   currency: "USD",
   unit: "USD_PER_MILLION_TOKENS",
-  uncachedInputUsdPerMillionTokens: 0.75,
-  cachedInputUsdPerMillionTokens: 0.075,
-  outputUsdPerMillionTokens: 4.5,
-  uncachedInputMicroUsdPerMillionTokens: 750_000,
-  cachedInputMicroUsdPerMillionTokens: 75_000,
-  outputMicroUsdPerMillionTokens: 4_500_000,
+  uncachedInputUsdPerMillionTokens:
+    CORE_RATES.uncachedInputMicroUsdPerMillionTokens / 1_000_000,
+  cachedInputUsdPerMillionTokens:
+    CORE_RATES.cachedInputMicroUsdPerMillionTokens / 1_000_000,
+  outputUsdPerMillionTokens:
+    CORE_RATES.outputMicroUsdPerMillionTokens / 1_000_000,
+  uncachedInputMicroUsdPerMillionTokens:
+    CORE_RATES.uncachedInputMicroUsdPerMillionTokens,
+  cachedInputMicroUsdPerMillionTokens:
+    CORE_RATES.cachedInputMicroUsdPerMillionTokens,
+  outputMicroUsdPerMillionTokens:
+    CORE_RATES.outputMicroUsdPerMillionTokens,
   rounding: "CEIL_EACH_AGGREGATE_CHARGE",
   source: "PINNED_STANDARD_PRICING_FOR_DEMO",
   disclosure:
@@ -56,9 +71,11 @@ export const DEMO_SCENARIOS: readonly DemoScenario[] = [
       id: "routine-pr-review-v1",
       name: "Routine PR Review",
       applicationCeilingMicroUsd: 75_000,
-      protectedFinalReserveMicroUsd: 14_000,
+      protectedFinalReserveMicroUsd: 25_000,
+      finalAnswerInputTokenLimit: 23_800,
+      minimumFinalOutputTokens: 1_440,
       maxResponses: 3,
-      maxEquivalentRetries: 1,
+      maxEquivalentRetries: 0,
       rateCardVersion: DEMO_RATE_CARD_VERSION
     },
     signals: [
@@ -84,6 +101,8 @@ export const DEMO_SCENARIOS: readonly DemoScenario[] = [
       name: "Routine PR Review",
       applicationCeilingMicroUsd: 35_000,
       protectedFinalReserveMicroUsd: 8_000,
+      finalAnswerInputTokenLimit: 5_320,
+      minimumFinalOutputTokens: 700,
       maxResponses: 2,
       maxEquivalentRetries: 1,
       rateCardVersion: DEMO_RATE_CARD_VERSION
@@ -110,7 +129,9 @@ export const DEMO_SCENARIOS: readonly DemoScenario[] = [
       id: "routine-pr-review-v1",
       name: "Routine PR Review",
       applicationCeilingMicroUsd: 65_000,
-      protectedFinalReserveMicroUsd: 12_000,
+      protectedFinalReserveMicroUsd: 21_000,
+      finalAnswerInputTokenLimit: 19_000,
+      minimumFinalOutputTokens: 1_300,
       maxResponses: 3,
       maxEquivalentRetries: 1,
       rateCardVersion: DEMO_RATE_CARD_VERSION
@@ -130,13 +151,24 @@ export interface UsageSeed {
 }
 
 export interface MetricsSeed {
-  readonly settledMicroUsd: number;
-  readonly reservedMicroUsd: number;
-  readonly finalReserveMicroUsd: number;
   readonly uncachedInputTokens: number;
   readonly cachedInputTokens: number;
   readonly outputTokens: number;
   readonly contextTokens: number;
+}
+
+export interface RequestSeed {
+  readonly phase: "work" | "final";
+  readonly exactInputTokens: number;
+  readonly requestedMaxOutputTokens: number;
+  readonly minimumUsefulOutputTokens: number;
+}
+
+export interface RetryAttemptSeed {
+  readonly toolName: string;
+  readonly arguments: JsonValue;
+  readonly errorClass: string;
+  readonly stateRevision: string;
 }
 
 export type ActionSeed = Omit<InterventionAction, "id">;
@@ -148,6 +180,10 @@ export interface EventSeed {
   readonly detail: string;
   readonly metrics: MetricsSeed;
   readonly risk: EventRiskSnapshot;
+  readonly request?: RequestSeed;
+  readonly retryAttempt?: RetryAttemptSeed;
+  readonly failedToolCall?: boolean;
+  readonly minimumCompletionCostMicroUsd?: number;
   readonly action?: ActionSeed;
   readonly receiptUsage?: UsageSeed;
 }
@@ -257,18 +293,12 @@ const RETRY_HARD_CAP_FAIL: QualityResult = {
 };
 
 function metrics(
-  settledMicroUsd: number,
-  reservedMicroUsd: number,
-  finalReserveMicroUsd: number,
   uncachedInputTokens: number,
   cachedInputTokens: number,
   outputTokens: number,
   contextTokens: number
 ): MetricsSeed {
   return {
-    settledMicroUsd,
-    reservedMicroUsd,
-    finalReserveMicroUsd,
     uncachedInputTokens,
     cachedInputTokens,
     outputTokens,
@@ -284,6 +314,7 @@ function risk(
   if (controller === "shadow") {
     return {
       band,
+      engine: "GOVERNOR_CORE",
       mode: "SHADOW",
       source: "SHADOW_FORECAST",
       observedDrivers
@@ -292,6 +323,7 @@ function risk(
 
   return {
     band,
+    engine: "GOVERNOR_CORE",
     mode: "ENFORCED",
     source:
       controller === "static" ? "STATIC_RULES" : "DETERMINISTIC_BOUND",
@@ -338,7 +370,7 @@ const LARGE_AT_RISK_DRIVERS = [
     "next-request-bound",
     "INCREASES_RISK",
     "Unreduced continuation does not fit",
-    "The conservative next-request bound plus 14,000 micro-USD final reserve exceeds the policy ceiling."
+    "The conservative next-request bound plus 25,000 micro-USD final reserve exceeds the policy ceiling."
   )
 ];
 
@@ -353,7 +385,7 @@ const LARGE_REDUCED_DRIVERS = [
     "completion-reserve",
     "DECREASES_RISK",
     "Completion budget remains protected",
-    "The reduced next request fits while retaining the 14,000 micro-USD final reserve."
+    "The reduced next request fits while retaining the 25,000 micro-USD final reserve."
   )
 ];
 
@@ -371,7 +403,7 @@ const RETRY_BASELINE = [
     "retry-policy-fit",
     "DECREASES_RISK",
     "Opening request fits",
-    "The initial context fits with a 12,000 micro-USD final reserve."
+    "The initial context fits with a 21,000 micro-USD final reserve."
   )
 ];
 
@@ -414,6 +446,76 @@ const RETRY_RECOVERY_DRIVERS = [
   )
 ];
 
+const LARGE_OPENING_REQUEST: RequestSeed = {
+  phase: "work",
+  exactInputTokens: 18_200,
+  requestedMaxOutputTokens: 8_000,
+  minimumUsefulOutputTokens: 1_100
+};
+
+const LARGE_CONTINUATION_REQUEST: RequestSeed = {
+  phase: "work",
+  exactInputTokens: 21_560,
+  requestedMaxOutputTokens: 5_000,
+  minimumUsefulOutputTokens: 1_800
+};
+
+const LARGE_FINAL_REQUEST: RequestSeed = {
+  phase: "final",
+  exactInputTokens: 23_800,
+  requestedMaxOutputTokens: 4_000,
+  minimumUsefulOutputTokens: 1_440
+};
+
+const CLEAN_OPENING_REQUEST: RequestSeed = {
+  phase: "work",
+  exactInputTokens: 4_200,
+  requestedMaxOutputTokens: 4_000,
+  minimumUsefulOutputTokens: 600
+};
+
+const CLEAN_FINAL_REQUEST: RequestSeed = {
+  phase: "final",
+  exactInputTokens: 5_320,
+  requestedMaxOutputTokens: 2_200,
+  minimumUsefulOutputTokens: 700
+};
+
+const RETRY_OPENING_REQUEST: RequestSeed = {
+  phase: "work",
+  exactInputTokens: 9_600,
+  requestedMaxOutputTokens: 5_000,
+  minimumUsefulOutputTokens: 900
+};
+
+const RETRY_CONTINUATION_REQUEST: RequestSeed = {
+  phase: "work",
+  exactInputTokens: 17_400,
+  requestedMaxOutputTokens: 4_000,
+  minimumUsefulOutputTokens: 1_200
+};
+
+const RETRY_FINAL_REQUEST: RequestSeed = {
+  phase: "final",
+  exactInputTokens: 19_000,
+  requestedMaxOutputTokens: 2_800,
+  minimumUsefulOutputTokens: 1_300
+};
+
+const LARGE_RETRY_ATTEMPT: RetryAttemptSeed = {
+  toolName: "run_tests",
+  arguments: { command: "npm test -- retry-context.test.ts" },
+  errorClass: "AssertionError",
+  stateRevision: "fixture-pr-1847-v1"
+};
+
+const RETRY_ATTEMPT: RetryAttemptSeed = {
+  toolName: "run_tests",
+  arguments: { command: "npm test -- retry-boundary.test.ts" },
+  errorClass: "AssertionError",
+  stateRevision: "fixture-pr-1856-v1"
+};
+
 function stopAction(reason: string): ActionSeed {
   return {
     kind: "STOP_BEFORE_OVERRUN",
@@ -440,7 +542,7 @@ function largeReductionAction(): ActionSeed {
     effect: {
       contextTokensRemoved: 12_640,
       retryPrevented: false,
-      reserveProtectedMicroUsd: 14_000,
+      reserveProtectedMicroUsd: 25_000,
       artifact: LARGE_LOG_ARTIFACT
     }
   };
@@ -489,7 +591,7 @@ function duplicateSuppressionAction(): ActionSeed {
     effect: {
       contextTokensRemoved: 6_520,
       retryPrevented: false,
-      reserveProtectedMicroUsd: 12_000,
+      reserveProtectedMicroUsd: 21_000,
       artifact: RETRY_LOG_ARTIFACT
     }
   };
@@ -515,7 +617,7 @@ function largeHardCapBlueprint(): RunBlueprint {
         type: "RUN_STARTED",
         title: "Synthetic review started",
         detail: "Applied the Routine PR Review policy to fixture PR #1847.",
-        metrics: metrics(0, 0, 14_000, 0, 0, 0, 18_200),
+        metrics: metrics(0, 0, 0, 18_200),
         risk: risk(controller, "SAFE", LARGE_BASELINE)
       },
       {
@@ -524,8 +626,9 @@ function largeHardCapBlueprint(): RunBlueprint {
         title: "Opening request admitted",
         detail:
           "Reserved a conservative synthetic maximum using the labeled demo rate card.",
-        metrics: metrics(0, 49_650, 14_000, 0, 0, 0, 18_200),
-        risk: risk(controller, "SAFE", LARGE_BASELINE)
+        metrics: metrics(0, 0, 0, 18_200),
+        risk: risk(controller, "SAFE", LARGE_BASELINE),
+        request: LARGE_OPENING_REQUEST
       },
       {
         offsetMs: 2_100,
@@ -533,7 +636,7 @@ function largeHardCapBlueprint(): RunBlueprint {
         title: "Opening response settled",
         detail:
           "Settled a synthetic receipt for repository inspection and a focused test command.",
-        metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 19_600),
+        metrics: metrics(18_200, 0, 1_100, 19_600),
         risk: risk(controller, "SAFE", LARGE_BASELINE),
         receiptUsage: firstReceipt
       },
@@ -543,8 +646,10 @@ function largeHardCapBlueprint(): RunBlueprint {
         title: "Failing test produced a large log",
         detail:
           "The deterministic fixture emitted 14,600 tokens of failing test output.",
-        metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 34_200),
-        risk: risk(controller, "WATCH", LARGE_LOG_DRIVERS)
+        metrics: metrics(18_200, 0, 1_100, 34_200),
+        risk: risk(controller, "WATCH", LARGE_LOG_DRIVERS),
+        retryAttempt: LARGE_RETRY_ATTEMPT,
+        failedToolCall: true
       },
       {
         offsetMs: 4_300,
@@ -552,8 +657,9 @@ function largeHardCapBlueprint(): RunBlueprint {
         title: "Continuation no longer fits",
         detail:
           "Without context reduction, the next conservative request and final reserve exceed the ceiling.",
-        metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 34_200),
-        risk: risk(controller, "AT_RISK", LARGE_AT_RISK_DRIVERS)
+        metrics: metrics(18_200, 0, 1_100, 34_200),
+        risk: risk(controller, "AT_RISK", LARGE_AT_RISK_DRIVERS),
+        minimumCompletionCostMicroUsd: 73_152
       },
       {
         offsetMs: 4_900,
@@ -561,10 +667,11 @@ function largeHardCapBlueprint(): RunBlueprint {
         title: "Hard cap stopped the run",
         detail:
           "No context optimization is available in this arm, so the request was not admitted.",
-        metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 34_200),
+        metrics: metrics(18_200, 0, 1_100, 34_200),
         risk: risk(controller, "AT_RISK", LARGE_AT_RISK_DRIVERS),
+        minimumCompletionCostMicroUsd: 73_152,
         action: stopAction(
-          "The proposed 48,150 micro-USD request bound would cross the 75,000 micro-USD ceiling after settled cost and reserve."
+          "The proposed continuation plus protected final request would cross the 75,000 micro-USD ceiling."
         )
       },
       {
@@ -573,8 +680,9 @@ function largeHardCapBlueprint(): RunBlueprint {
         title: "Quality gate failed",
         detail:
           "The stopped trace has no valid structured final review and is ineligible for cost comparison.",
-        metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 34_200),
-        risk: risk(controller, "AT_RISK", LARGE_AT_RISK_DRIVERS)
+        metrics: metrics(18_200, 0, 1_100, 34_200),
+        risk: risk(controller, "AT_RISK", LARGE_AT_RISK_DRIVERS),
+        minimumCompletionCostMicroUsd: 73_152
       },
       {
         offsetMs: 5_800,
@@ -582,7 +690,7 @@ function largeHardCapBlueprint(): RunBlueprint {
         title: "Run stopped within the hard ceiling",
         detail:
           "The synthetic cost stayed bounded, but the task did not meet its quality contract.",
-        metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 34_200),
+        metrics: metrics(18_200, 0, 1_100, 34_200),
         risk: risk(controller, "AT_RISK", LARGE_AT_RISK_DRIVERS)
       }
     ]
@@ -611,7 +719,7 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       type: "RUN_STARTED",
       title: "Synthetic review started",
       detail: "Applied the Routine PR Review policy to fixture PR #1847.",
-      metrics: metrics(0, 0, 14_000, 0, 0, 0, 18_200),
+      metrics: metrics(0, 0, 0, 18_200),
       risk: risk(controller, "SAFE", LARGE_BASELINE)
     },
     {
@@ -620,8 +728,9 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       title: "Opening request admitted",
       detail:
         "Reserved a conservative synthetic maximum using the labeled demo rate card.",
-      metrics: metrics(0, 49_650, 14_000, 0, 0, 0, 18_200),
-      risk: risk(controller, "SAFE", LARGE_BASELINE)
+      metrics: metrics(0, 0, 0, 18_200),
+      risk: risk(controller, "SAFE", LARGE_BASELINE),
+      request: LARGE_OPENING_REQUEST
     },
     {
       offsetMs: 2_100,
@@ -629,7 +738,7 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       title: "Opening response settled",
       detail:
         "Settled a synthetic receipt for repository inspection and a focused test command.",
-      metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 19_600),
+      metrics: metrics(18_200, 0, 1_100, 19_600),
       risk: risk(controller, "SAFE", LARGE_BASELINE),
       receiptUsage: firstReceipt
     },
@@ -639,8 +748,10 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       title: "Failing test produced a large log",
       detail:
         "The deterministic fixture emitted 14,600 tokens of failing test output.",
-      metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 34_200),
-      risk: risk(controller, "WATCH", LARGE_LOG_DRIVERS)
+      metrics: metrics(18_200, 0, 1_100, 34_200),
+      risk: risk(controller, "WATCH", LARGE_LOG_DRIVERS),
+      retryAttempt: LARGE_RETRY_ATTEMPT,
+      failedToolCall: true
     }
   ];
 
@@ -651,9 +762,10 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       title: "Shadow risk moved to AT_RISK",
       detail:
         "The shadow signal records that an unreduced continuation cannot preserve the final reserve.",
-      metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 34_200),
+      metrics: metrics(18_200, 0, 1_100, 34_200),
       risk: risk(controller, "AT_RISK", LARGE_AT_RISK_DRIVERS),
-      action: shadowPreserveAction(14_000)
+      minimumCompletionCostMicroUsd: 73_152,
+      action: shadowPreserveAction(25_000)
     });
   }
 
@@ -664,7 +776,7 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       title: "Large log reduced into an artifact",
       detail:
         "Kept the exit code, failing test, error location, and truncation disclosure in context.",
-      metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 21_560),
+      metrics: metrics(18_200, 0, 1_100, 21_560),
       risk: risk(
         controller,
         controller === "shadow" ? "AT_RISK" : "WATCH",
@@ -678,9 +790,10 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       title: "Unchanged retry rejected",
       detail:
         "The same command against the same fixture state was rejected before request admission.",
-      metrics: metrics(18_600, 0, 14_000, 18_200, 0, 1_100, 21_560),
+      metrics: metrics(18_200, 0, 1_100, 21_560),
       risk: risk(controller, "WATCH", LARGE_REDUCED_DRIVERS),
-      action: retryRejectionAction(14_000)
+      retryAttempt: LARGE_RETRY_ATTEMPT,
+      action: retryRejectionAction(25_000)
     },
     {
       offsetMs: 6_100,
@@ -688,8 +801,9 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       title: "Reduced continuation admitted",
       detail:
         "The 21,560-token context now fits with the protected final reserve.",
-      metrics: metrics(18_600, 38_670, 14_000, 18_200, 0, 1_100, 21_560),
-      risk: risk(controller, "WATCH", LARGE_REDUCED_DRIVERS)
+      metrics: metrics(18_200, 0, 1_100, 21_560),
+      risk: risk(controller, "WATCH", LARGE_REDUCED_DRIVERS),
+      request: LARGE_CONTINUATION_REQUEST
     },
     {
       offsetMs: 7_600,
@@ -698,9 +812,6 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       detail:
         "Settled a second synthetic receipt after reviewing the reduced failure evidence.",
       metrics: metrics(
-        32_745,
-        0,
-        14_000,
         24_760,
         15_000,
         2_900,
@@ -716,15 +827,13 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       detail:
         "Converted the protected completion reserve into a bounded final request.",
       metrics: metrics(
-        32_745,
-        35_850,
-        0,
         24_760,
         15_000,
         2_900,
         23_800
       ),
-      risk: risk(controller, "WATCH", LARGE_REDUCED_DRIVERS)
+      risk: risk(controller, "WATCH", LARGE_REDUCED_DRIVERS),
+      request: LARGE_FINAL_REQUEST
     },
     {
       offsetMs: 9_900,
@@ -733,9 +842,6 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       detail:
         "Settled the final synthetic receipt and sealed the structured review.",
       metrics: metrics(
-        44_925,
-        0,
-        0,
         30_560,
         33_000,
         4_340,
@@ -758,9 +864,6 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       detail:
         "The sealed deterministic rubric found both seeded issues and no critical false positive.",
       metrics: metrics(
-        44_925,
-        0,
-        0,
         30_560,
         33_000,
         4_340,
@@ -782,9 +885,6 @@ function largeGovernedBlueprint(controller: "static" | "shadow"): RunBlueprint {
       detail:
         "The run completed with 30,075 micro-USD of unused synthetic capacity.",
       metrics: metrics(
-        44_925,
-        0,
-        0,
         30_560,
         33_000,
         4_340,
@@ -830,7 +930,7 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       type: "RUN_STARTED",
       title: "Synthetic review started",
       detail: "Applied the Routine PR Review policy to fixture PR #1851.",
-      metrics: metrics(0, 0, 8_000, 0, 0, 0, 4_200),
+      metrics: metrics(0, 0, 0, 4_200),
       risk: risk(controller, "SAFE", CLEAN_DRIVERS)
     },
     {
@@ -839,8 +939,9 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       title: "Opening request admitted",
       detail:
         "The compact diff fits comfortably with its protected final reserve.",
-      metrics: metrics(0, 21_150, 8_000, 0, 0, 0, 4_200),
-      risk: risk(controller, "SAFE", CLEAN_DRIVERS)
+      metrics: metrics(0, 0, 0, 4_200),
+      risk: risk(controller, "SAFE", CLEAN_DRIVERS),
+      request: CLEAN_OPENING_REQUEST
     },
     {
       offsetMs: 1_700,
@@ -848,7 +949,7 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       title: "Focused inspection settled",
       detail:
         "Settled a synthetic receipt after reading the diff and running focused tests.",
-      metrics: metrics(5_850, 0, 8_000, 4_200, 0, 600, 5_300),
+      metrics: metrics(4_200, 0, 600, 5_300),
       risk: risk(controller, "SAFE", CLEAN_DRIVERS),
       receiptUsage: firstReceipt
     },
@@ -858,7 +959,7 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       title: "Focused tests passed",
       detail:
         "The deterministic clean fixture returned a small passing result.",
-      metrics: metrics(5_850, 0, 8_000, 4_200, 0, 600, 5_300),
+      metrics: metrics(4_200, 0, 600, 5_300),
       risk: risk(controller, "SAFE", CLEAN_DRIVERS)
     }
   ];
@@ -870,7 +971,7 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       title: "Shadow risk remained SAFE",
       detail:
         "No forecast recommendation is recorded because context and cost remain stable.",
-      metrics: metrics(5_850, 0, 8_000, 4_200, 0, 600, 5_300),
+      metrics: metrics(4_200, 0, 600, 5_300),
       risk: risk(controller, "SAFE", CLEAN_DRIVERS)
     });
   }
@@ -881,8 +982,9 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       type: "REQUEST_ADMITTED",
       title: "Final review request admitted",
       detail: "Converted the completion reserve into a bounded final request.",
-      metrics: metrics(5_850, 14_000, 0, 4_200, 0, 600, 5_300),
-      risk: risk(controller, "SAFE", CLEAN_DRIVERS)
+      metrics: metrics(4_200, 0, 600, 5_320),
+      risk: risk(controller, "SAFE", CLEAN_DRIVERS),
+      request: CLEAN_FINAL_REQUEST
     },
     {
       offsetMs: 4_700,
@@ -891,9 +993,6 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       detail:
         "Settled the final synthetic receipt and sealed a structured review with no findings.",
       metrics: metrics(
-        10_830,
-        0,
-        0,
         6_320,
         3_200,
         1_300,
@@ -909,9 +1008,6 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       detail:
         "The deterministic rubric confirmed a valid review with no invented finding.",
       metrics: metrics(
-        10_830,
-        0,
-        0,
         6_320,
         3_200,
         1_300,
@@ -926,9 +1022,6 @@ function cleanBlueprint(controller: DemoController): RunBlueprint {
       detail:
         "The run passed quality with 24,170 micro-USD of unused synthetic capacity.",
       metrics: metrics(
-        10_830,
-        0,
-        0,
         6_320,
         3_200,
         1_300,
@@ -975,7 +1068,7 @@ function retryHardCapBlueprint(): RunBlueprint {
         type: "RUN_STARTED",
         title: "Synthetic review started",
         detail: "Applied the Routine PR Review policy to fixture PR #1856.",
-        metrics: metrics(0, 0, 12_000, 0, 0, 0, 9_600),
+        metrics: metrics(0, 0, 0, 9_600),
         risk: risk(controller, "SAFE", RETRY_BASELINE)
       },
       {
@@ -983,8 +1076,9 @@ function retryHardCapBlueprint(): RunBlueprint {
         type: "REQUEST_ADMITTED",
         title: "Opening request admitted",
         detail: "Reserved a bounded opening inspection.",
-        metrics: metrics(0, 29_700, 12_000, 0, 0, 0, 9_600),
-        risk: risk(controller, "SAFE", RETRY_BASELINE)
+        metrics: metrics(0, 0, 0, 9_600),
+        risk: risk(controller, "SAFE", RETRY_BASELINE),
+        request: RETRY_OPENING_REQUEST
       },
       {
         offsetMs: 1_800,
@@ -992,7 +1086,7 @@ function retryHardCapBlueprint(): RunBlueprint {
         title: "Opening response settled",
         detail:
           "Settled a synthetic receipt after the first test command was proposed.",
-        metrics: metrics(11_250, 0, 12_000, 9_600, 0, 900, 10_600),
+        metrics: metrics(9_600, 0, 900, 10_600),
         risk: risk(controller, "SAFE", RETRY_BASELINE),
         receiptUsage: firstReceipt
       },
@@ -1001,8 +1095,10 @@ function retryHardCapBlueprint(): RunBlueprint {
         type: "TOOL_RESULT",
         title: "Retry-boundary test failed",
         detail: "The deterministic fixture emitted 6,800 tokens of output.",
-        metrics: metrics(11_250, 0, 12_000, 9_600, 0, 900, 17_400),
-        risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS)
+        metrics: metrics(9_600, 0, 900, 17_400),
+        risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS),
+        retryAttempt: RETRY_ATTEMPT,
+        failedToolCall: true
       },
       {
         offsetMs: 3_500,
@@ -1010,8 +1106,9 @@ function retryHardCapBlueprint(): RunBlueprint {
         title: "Equivalent retry admitted",
         detail:
           "The first equivalent retry is inside policy and is admitted without duplicate suppression.",
-        metrics: metrics(11_250, 31_050, 12_000, 9_600, 0, 900, 17_400),
-        risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS)
+        metrics: metrics(9_600, 0, 900, 17_400),
+        risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS),
+        request: RETRY_CONTINUATION_REQUEST
       },
       {
         offsetMs: 4_800,
@@ -1020,9 +1117,6 @@ function retryHardCapBlueprint(): RunBlueprint {
         detail:
           "Settled a second synthetic receipt before the unchanged result returned.",
         metrics: metrics(
-          24_300,
-          0,
-          12_000,
           19_000,
           8_000,
           2_100,
@@ -1038,15 +1132,14 @@ function retryHardCapBlueprint(): RunBlueprint {
         detail:
           "The hard-cap arm retained the second byte-identical 6,800-token fixture log.",
         metrics: metrics(
-          24_300,
-          0,
-          12_000,
           19_000,
           8_000,
           2_100,
           25_200
         ),
-        risk: risk(controller, "AT_RISK", RETRY_AT_RISK_DRIVERS)
+        risk: risk(controller, "AT_RISK", RETRY_AT_RISK_DRIVERS),
+        retryAttempt: RETRY_ATTEMPT,
+        failedToolCall: true
       },
       {
         offsetMs: 6_400,
@@ -1055,9 +1148,6 @@ function retryHardCapBlueprint(): RunBlueprint {
         detail:
           "The unreduced continuation cannot fit with the protected final reserve.",
         metrics: metrics(
-          24_300,
-          0,
-          12_000,
           19_000,
           8_000,
           2_100,
@@ -1065,7 +1155,7 @@ function retryHardCapBlueprint(): RunBlueprint {
         ),
         risk: risk(controller, "AT_RISK", RETRY_AT_RISK_DRIVERS),
         action: stopAction(
-          "The next 36,900 micro-USD conservative request bound would exceed the 65,000 micro-USD ceiling."
+          "The next conservative request plus protected final request would exceed the 65,000 micro-USD ceiling."
         )
       },
       {
@@ -1075,9 +1165,6 @@ function retryHardCapBlueprint(): RunBlueprint {
         detail:
           "No valid final review was sealed, so this lower-cost stopped run is not cost-comparison eligible.",
         metrics: metrics(
-          24_300,
-          0,
-          12_000,
           19_000,
           8_000,
           2_100,
@@ -1092,9 +1179,6 @@ function retryHardCapBlueprint(): RunBlueprint {
         detail:
           "The synthetic cost stayed bounded, but the seeded issue was not reported.",
         metrics: metrics(
-          24_300,
-          0,
-          12_000,
           19_000,
           8_000,
           2_100,
@@ -1130,7 +1214,7 @@ function retryGovernedBlueprint(
       type: "RUN_STARTED",
       title: "Synthetic review started",
       detail: "Applied the Routine PR Review policy to fixture PR #1856.",
-      metrics: metrics(0, 0, 12_000, 0, 0, 0, 9_600),
+      metrics: metrics(0, 0, 0, 9_600),
       risk: risk(controller, "SAFE", RETRY_BASELINE)
     },
     {
@@ -1138,8 +1222,9 @@ function retryGovernedBlueprint(
       type: "REQUEST_ADMITTED",
       title: "Opening request admitted",
       detail: "Reserved a bounded opening inspection.",
-      metrics: metrics(0, 29_700, 12_000, 0, 0, 0, 9_600),
-      risk: risk(controller, "SAFE", RETRY_BASELINE)
+      metrics: metrics(0, 0, 0, 9_600),
+      risk: risk(controller, "SAFE", RETRY_BASELINE),
+      request: RETRY_OPENING_REQUEST
     },
     {
       offsetMs: 1_800,
@@ -1147,7 +1232,7 @@ function retryGovernedBlueprint(
       title: "Opening response settled",
       detail:
         "Settled a synthetic receipt after the first test command was proposed.",
-      metrics: metrics(11_250, 0, 12_000, 9_600, 0, 900, 10_600),
+      metrics: metrics(9_600, 0, 900, 10_600),
       risk: risk(controller, "SAFE", RETRY_BASELINE),
       receiptUsage: firstReceipt
     },
@@ -1156,16 +1241,19 @@ function retryGovernedBlueprint(
       type: "TOOL_RESULT",
       title: "Retry-boundary test failed",
       detail: "The deterministic fixture emitted 6,800 tokens of output.",
-      metrics: metrics(11_250, 0, 12_000, 9_600, 0, 900, 17_400),
-      risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS)
+      metrics: metrics(9_600, 0, 900, 17_400),
+      risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS),
+      retryAttempt: RETRY_ATTEMPT,
+      failedToolCall: true
     },
     {
       offsetMs: 3_500,
       type: "REQUEST_ADMITTED",
       title: "Equivalent retry admitted",
       detail: "One bounded equivalent retry is allowed by the frozen policy.",
-      metrics: metrics(11_250, 31_050, 12_000, 9_600, 0, 900, 17_400),
-      risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS)
+      metrics: metrics(9_600, 0, 900, 17_400),
+      risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS),
+      request: RETRY_CONTINUATION_REQUEST
     },
     {
       offsetMs: 4_800,
@@ -1174,16 +1262,15 @@ function retryGovernedBlueprint(
       detail:
         "Settled a second synthetic receipt before the unchanged result returned.",
       metrics: metrics(
-        24_300,
-        0,
-        12_000,
         19_000,
         8_000,
         2_100,
         18_400
       ),
       risk: risk(controller, "WATCH", RETRY_WATCH_DRIVERS),
-      receiptUsage: secondReceipt
+      receiptUsage: secondReceipt,
+      retryAttempt: RETRY_ATTEMPT,
+      failedToolCall: true
     }
   ];
 
@@ -1195,16 +1282,13 @@ function retryGovernedBlueprint(
       detail:
         "The shadow signal recommends protecting the final response before another unchanged attempt.",
       metrics: metrics(
-        24_300,
-        0,
-        12_000,
         19_000,
         8_000,
         2_100,
         18_400
       ),
       risk: risk(controller, "AT_RISK", RETRY_AT_RISK_DRIVERS),
-      action: shadowPreserveAction(12_000)
+      action: shadowPreserveAction(21_000)
     });
   }
 
@@ -1216,9 +1300,6 @@ function retryGovernedBlueprint(
       detail:
         "Stored the full synthetic fixture log by checksum and kept a 280-token reference in context.",
       metrics: metrics(
-        24_300,
-        0,
-        12_000,
         19_000,
         8_000,
         2_100,
@@ -1238,16 +1319,14 @@ function retryGovernedBlueprint(
       detail:
         "The equivalent retry limit was reached, so no additional synthetic request was admitted.",
       metrics: metrics(
-        24_300,
-        0,
-        12_000,
         19_000,
         8_000,
         2_100,
         18_680
       ),
       risk: risk(controller, "WATCH", RETRY_RECOVERY_DRIVERS),
-      action: retryRejectionAction(12_000)
+      retryAttempt: RETRY_ATTEMPT,
+      action: retryRejectionAction(21_000)
     },
     {
       offsetMs: 7_100,
@@ -1256,15 +1335,13 @@ function retryGovernedBlueprint(
       detail:
         "The checksummed reference and preserved reserve leave room for a bounded final response.",
       metrics: metrics(
-        24_300,
-        27_000,
-        0,
         19_000,
         8_000,
         2_100,
-        18_680
+        19_000
       ),
-      risk: risk(controller, "WATCH", RETRY_RECOVERY_DRIVERS)
+      risk: risk(controller, "WATCH", RETRY_RECOVERY_DRIVERS),
+      request: RETRY_FINAL_REQUEST
     },
     {
       offsetMs: 8_500,
@@ -1273,9 +1350,6 @@ function retryGovernedBlueprint(
       detail:
         "Settled the final synthetic receipt and sealed the retry-boundary finding.",
       metrics: metrics(
-        34_950,
-        0,
-        0,
         24_000,
         22_000,
         3_400,
@@ -1291,9 +1365,6 @@ function retryGovernedBlueprint(
       detail:
         "The sealed deterministic rubric confirmed the seeded retry-boundary finding.",
       metrics: metrics(
-        34_950,
-        0,
-        0,
         24_000,
         22_000,
         3_400,
@@ -1308,9 +1379,6 @@ function retryGovernedBlueprint(
       detail:
         "The run passed quality with 30,050 micro-USD of unused synthetic capacity.",
       metrics: metrics(
-        34_950,
-        0,
-        0,
         24_000,
         22_000,
         3_400,

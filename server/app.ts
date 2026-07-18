@@ -8,8 +8,17 @@ import { createDemoRun, getDemoCatalog } from "./demo/index.js";
 import { ApiError, errorMessage } from "./errors.js";
 import { runRepairDemo } from "./repair/api.js";
 import { resolveProviderMode, type ProviderMode } from "./openai/provider-factory.js";
+import { GovernedJobService } from "./jobs/index.js";
+import { OpenAiResponsesClient } from "./openai/index.js";
+import type { ResponsesProvider } from "./runtime/index.js";
 
-const BODY_LIMIT = "16kb";
+const BODY_LIMIT = "256kb";
+
+export type CreateAppOptions = {
+  readonly provider?: ResponsesProvider | null;
+  readonly jobIdFactory?: () => string;
+  readonly now?: () => Date;
+};
 
 function applySecurityHeaders(
   _request: Request,
@@ -39,7 +48,15 @@ const handleError: ErrorRequestHandler = (
   if (error instanceof ApiError) {
     response
       .status(error.status)
-      .json({ error: { code: error.code, message: error.message } });
+      .json({
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.details === undefined
+            ? {}
+            : { details: error.details })
+        }
+      });
     return;
   }
 
@@ -82,8 +99,27 @@ const handleError: ErrorRequestHandler = (
   });
 };
 
-export function createApp(): Express {
+function configuredProvider(): ResponsesProvider | undefined {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    return undefined;
+  }
+  return new OpenAiResponsesClient({ apiKey });
+}
+
+export function createApp(options: CreateAppOptions = {}): Express {
   const app = express();
+  const provider =
+    options.provider === null
+      ? undefined
+      : (options.provider ?? configuredProvider());
+  const jobs = new GovernedJobService({
+    ...(provider === undefined ? {} : { provider }),
+    ...(options.jobIdFactory === undefined
+      ? {}
+      : { idFactory: options.jobIdFactory }),
+    ...(options.now === undefined ? {} : { now: options.now })
+  });
   app.disable("x-powered-by");
   app.use(applySecurityHeaders);
   app.use(express.json({ limit: BODY_LIMIT }));
@@ -93,7 +129,8 @@ export function createApp(): Express {
       service: "token-governor",
       status: "ready",
       mode: "demo",
-      providerConfigured: Boolean(process.env.OPENAI_API_KEY?.trim())
+      providerConfigured: provider !== undefined,
+      governedApi: true
     });
   });
 
@@ -134,6 +171,49 @@ export function createApp(): Express {
       .catch((error: unknown) => {
         next(new ApiError("REPAIR_RUN_FAILED", errorMessage(error), 400));
       });
+  });
+
+  app.post("/v1/jobs", (request, response) => {
+    response.set("Cache-Control", "no-store");
+    response.status(201).json(jobs.createJob(request.body));
+  });
+
+  app.get("/v1/jobs/:jobId", (request, response) => {
+    response.set("Cache-Control", "no-store");
+    response.json(jobs.getJob(request.params.jobId));
+  });
+
+  app.get(
+    "/v1/jobs/:jobId/responses/:requestId",
+    async (request, response) => {
+      response.set("Cache-Control", "no-store");
+      const result = await jobs.getResponse(
+        request.params.jobId,
+        request.params.requestId
+      );
+      response.status(result.statusCode).json(result.body);
+    }
+  );
+
+  app.post(
+    "/v1/jobs/:jobId/responses",
+    async (request, response) => {
+      response.set("Cache-Control", "no-store");
+      const result = await jobs.createResponse(
+        request.params.jobId,
+        request.body
+      );
+      response.status(result.statusCode).json(result.body);
+    }
+  );
+
+  app.post("/v1/jobs/:jobId/finalize", (request, response) => {
+    response.set("Cache-Control", "no-store");
+    response.json(jobs.finalizeJob(request.params.jobId, request.body));
+  });
+
+  app.use("/v1", (_request, _response, next) => {
+    next(new ApiError("NOT_FOUND", "The API route does not exist.", 404));
   });
 
   app.use("/api", (_request, _response, next) => {

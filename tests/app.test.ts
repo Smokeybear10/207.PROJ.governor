@@ -25,7 +25,7 @@ afterEach(async () => {
   );
 });
 
-describe("TokenGovernor API", () => {
+describe("Governor API", () => {
   it("reports readiness without exposing provider credentials", async () => {
     const baseUrl = await startApp();
     const response = await fetch(`${baseUrl}/api/health`);
@@ -35,7 +35,8 @@ describe("TokenGovernor API", () => {
       service: "token-governor",
       status: "ready",
       mode: "demo",
-      providerConfigured: false
+      providerConfigured: false,
+      governedApi: true
     });
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("x-frame-options")).toBe("DENY");
@@ -118,7 +119,7 @@ describe("TokenGovernor API", () => {
     const oversized = await fetch(`${baseUrl}/api/demo/runs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ padding: "x".repeat(20_000) })
+      body: JSON.stringify({ padding: "x".repeat(300_000) })
     });
     expect(oversized.status).toBe(413);
     expect(await oversized.json()).toMatchObject({

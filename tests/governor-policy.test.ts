@@ -146,6 +146,12 @@ describe("duplicate retry fingerprint tracking", () => {
       errorClass: "AssertionError",
       stateRevision: "repo-1"
     });
+    const fourth = tracker.observe({
+      toolName: "run_tests",
+      arguments: { flags: ["--run"], command: "npm test" },
+      errorClass: "AssertionError",
+      stateRevision: "repo-1"
+    });
 
     expect(first).toMatchObject({
       state: "FIRST_FAILURE",
@@ -159,8 +165,13 @@ describe("duplicate retry fingerprint tracking", () => {
     });
     expect(second.fingerprint).toBe(first.fingerprint);
     expect(third).toMatchObject({
-      state: "LIMIT_REACHED",
+      state: "EQUIVALENT_RETRY",
       equivalentRetryCount: 2,
+      retryAllowed: true
+    });
+    expect(fourth).toMatchObject({
+      state: "LIMIT_REACHED",
+      equivalentRetryCount: 3,
       retryAllowed: false
     });
   });
@@ -211,18 +222,23 @@ describe("duplicate retry fingerprint tracking", () => {
     });
   });
 
-  it("allows no equivalent retry when the retry budget is zero", () => {
+  it("rejects the first equivalent retry when the retry budget is zero", () => {
     const tracker = new RetryFingerprintTracker(0);
-    expect(
-      tracker.observe({
-        toolName: "run_tests",
-        arguments: { command: "npm test" },
-        errorClass: "AssertionError",
-        stateRevision: "repo-1"
-      })
-    ).toMatchObject({
+    const attempt = {
+      toolName: "run_tests",
+      arguments: { command: "npm test" },
+      errorClass: "AssertionError",
+      stateRevision: "repo-1"
+    } as const;
+
+    expect(tracker.observe(attempt)).toMatchObject({
       state: "FIRST_FAILURE",
       equivalentRetryCount: 0,
+      retryAllowed: true
+    });
+    expect(tracker.observe(attempt)).toMatchObject({
+      state: "LIMIT_REACHED",
+      equivalentRetryCount: 1,
       retryAllowed: false
     });
   });

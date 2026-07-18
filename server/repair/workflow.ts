@@ -79,6 +79,7 @@ export type RepairStopReason =
   | "WORK_PREFLIGHT_FAILED"
   | "WORK_DENIED"
   | "WORK_UNRESOLVED"
+  | "WORK_PROVIDER_REJECTED"
   | "WORK_PROVIDER_STOPPED"
   | "OUTPUT_PROTOCOL_ERROR"
   | "DUPLICATE_TOOL_CALL"
@@ -87,6 +88,7 @@ export type RepairStopReason =
   | "FINAL_PREFLIGHT_FAILED"
   | "FINAL_DENIED"
   | "FINAL_UNRESOLVED"
+  | "FINAL_PROVIDER_REJECTED"
   | "FINAL_PROVIDER_STOPPED"
   | "FINAL_OUTPUT_INVALID";
 
@@ -210,6 +212,7 @@ function classifyWorkStop(
 ): RepairStopReason | null {
   if (result.status === "preflight_failed") return "WORK_PREFLIGHT_FAILED";
   if (result.status === "denied") return "WORK_DENIED";
+  if (result.status === "provider_rejected") return "WORK_PROVIDER_REJECTED";
   if (result.status === "unresolved") return "WORK_UNRESOLVED";
   if (result.status === "provider_stopped" && result.reason !== "incomplete") {
     return "WORK_PROVIDER_STOPPED";
@@ -428,6 +431,9 @@ export async function runGovernedRepair(
   }
   if (finalResult.status === "denied") {
     return notRepaired("FINAL_DENIED", evaluation, null, trace, toolCalls, input);
+  }
+  if (finalResult.status === "provider_rejected") {
+    return notRepaired("FINAL_PROVIDER_REJECTED", evaluation, null, trace, toolCalls, input);
   }
   if (finalResult.status === "unresolved") {
     return notRepaired("FINAL_UNRESOLVED", evaluation, null, trace, toolCalls, input);
