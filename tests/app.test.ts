@@ -126,6 +126,38 @@ describe("TokenGovernor API", () => {
     });
   });
 
+  it("repairs a broken fixture through the governed repair endpoint", async () => {
+    const baseUrl = await startApp();
+    const response = await fetch(`${baseUrl}/api/repair/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtureId: "broken-sum", mode: "fake" })
+    });
+    const body = (await response.json()) as {
+      mode: string;
+      result: { status: string; evaluation?: { passed: boolean } };
+    };
+
+    expect(response.status).toBe(201);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(body.mode).toBe("fake");
+    expect(body.result.status).toBe("repaired");
+    expect(body.result.evaluation?.passed).toBe(true);
+  });
+
+  it("rejects an unknown repair fixture with a stable error", async () => {
+    const baseUrl = await startApp();
+    const response = await fetch(`${baseUrl}/api/repair/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtureId: "does-not-exist", mode: "fake" })
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: "REPAIR_RUN_FAILED" }
+    });
+  });
+
   it("keeps unknown API routes behind the JSON error envelope", async () => {
     const baseUrl = await startApp();
     const response = await fetch(`${baseUrl}/api/not-real`);

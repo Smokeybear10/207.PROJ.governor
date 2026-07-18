@@ -185,6 +185,23 @@ export const GPT_5_4_MINI_STANDARD_RATE_CARD = createRateCard({
   }
 });
 
+export const GPT_5_NANO_STANDARD_RATE_CARD = createRateCard({
+  provider: "openai",
+  model: "gpt-5-nano",
+  serviceTier: "standard",
+  processingRegion: "global",
+  version: "openai-gpt-5-nano-standard-2026-07-18",
+  currency: "USD",
+  effectiveAt: "2026-07-18T00:00:00.000Z",
+  source: "https://platform.openai.com/docs/pricing",
+  rates: {
+    uncachedInputMicroUsdPerMillionTokens: 50_000,
+    cachedInputMicroUsdPerMillionTokens: 5_000,
+    cacheWriteInputMicroUsdPerMillionTokens: 50_000,
+    outputMicroUsdPerMillionTokens: 400_000
+  }
+});
+
 export function normalizeProviderUsage(
   usage: ProviderUsage
 ): NormalizedProviderUsage {

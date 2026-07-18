@@ -6,6 +6,8 @@ import express, {
 } from "express";
 import { createDemoRun, getDemoCatalog } from "./demo/index.js";
 import { ApiError, errorMessage } from "./errors.js";
+import { runRepairDemo } from "./repair/api.js";
+import { resolveProviderMode, type ProviderMode } from "./openai/provider-factory.js";
 
 const BODY_LIMIT = "16kb";
 
@@ -103,6 +105,35 @@ export function createApp(): Express {
   app.post("/api/demo/runs", (request, response) => {
     response.set("Cache-Control", "no-store");
     response.status(201).json(createDemoRun(request.body));
+  });
+
+  app.post("/api/repair/runs", (request, response, next) => {
+    response.set("Cache-Control", "no-store");
+    const body: unknown = request.body ?? {};
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      next(new ApiError("INVALID_REPAIR_INPUT", "Request body must be an object.", 400));
+      return;
+    }
+    const record = body as Record<string, unknown>;
+    const fixtureId =
+      record.fixtureId === undefined ? undefined : String(record.fixtureId);
+    let mode: ProviderMode | undefined;
+    try {
+      mode =
+        record.mode === undefined
+          ? undefined
+          : resolveProviderMode(String(record.mode));
+    } catch (error) {
+      next(new ApiError("INVALID_PROVIDER_MODE", errorMessage(error), 400));
+      return;
+    }
+    runRepairDemo({ fixtureId, mode })
+      .then((result) => {
+        response.status(201).json(result);
+      })
+      .catch((error: unknown) => {
+        next(new ApiError("REPAIR_RUN_FAILED", errorMessage(error), 400));
+      });
   });
 
   app.use("/api", (_request, _response, next) => {

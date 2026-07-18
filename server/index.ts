@@ -24,6 +24,7 @@ export {
 } from "./openai/index.js";
 export * from "./runtime/index.js";
 export * from "./review/index.js";
+export * from "./repair/index.js";
 export { closeSse, formatSseEvent, openSse, sendSse } from "./sse.js";
 
 export const app = createApp();
