@@ -14,6 +14,13 @@ while work runs through the governor.
   accounting breakdown, and every submitted request with its phase and
   status, so you can see which steps to look into. Sits alongside the file
   explorer like Copilot does; works in VS Code and Cursor.
+- **Budget outlook (ahead-of-time limit warning)**: the view estimates how
+  many more work calls fit — remaining work headroom divided by the average
+  cost of the calls settled so far — and shows a banner as the job crosses
+  into "room for ~N more calls", "room for about one more", then "no room".
+  Before you submit a work call that's likely to be denied, it asks you to
+  confirm. The signal is the job's own measured numbers; it never predicts a
+  cost the governor hasn't settled.
 - **Commands** (Cmd+Shift+P, category "Governor"):
   - Health Check
   - Create Job (prompts for a USD budget, e.g. `0.075`)

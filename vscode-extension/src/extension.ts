@@ -39,12 +39,41 @@ type JobView = {
     committed_usd: string;
     uncommitted_micro_usd: number;
     uncommitted_usd: string;
+    available_for_work_micro_usd: number;
     available_for_work_usd: string;
     responses_started: number;
   };
   pending_final_validation_request_id: string | null;
   completion_accepted: boolean | null;
   requests: JobRequestSummary[];
+};
+
+type SubmissionResponse = {
+  model: string;
+  status: string;
+  output: unknown[];
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+  } | null;
+};
+
+type SubmissionExecution = {
+  status: string;
+  reason?: string;
+  response?: SubmissionResponse | null;
+  reservation?: {
+    exact_input_tokens: number;
+    max_output_tokens: number;
+    reserved_usd: string;
+    settled_usd: string | null;
+  };
+};
+
+type ResponseSubmission = {
+  execution: SubmissionExecution;
+  job: JobView;
 };
 
 class GovernorApiError extends Error {
@@ -131,6 +160,85 @@ function usd(value: string): string {
   return `$${value}`;
 }
 
+function microToUsd(micro: number): string {
+  return `$${(Math.max(0, micro) / 1_000_000).toFixed(6)}`;
+}
+
+type BudgetOutlookLevel = "ok" | "watch" | "at_risk" | "exhausted";
+
+type BudgetOutlook = {
+  readonly level: BudgetOutlookLevel;
+  readonly headline: string;
+  readonly detail: string;
+};
+
+// Forward-looking read of the job before the next call is dispatched, from the
+// governor's own numbers only. The predictive part: work headroom (budget
+// minus committed minus the protected final reserve) divided by the average
+// cost of the calls settled so far estimates how many more calls fit. That
+// surfaces an approaching limit ahead of time instead of after a denial, and
+// never invents a cost the governor has not measured. Before any call settles
+// it falls back to the committed-budget band.
+function budgetOutlook(job: JobView): BudgetOutlook {
+  const availableForWork = job.accounting.available_for_work_micro_usd;
+  const available = usd(job.accounting.available_for_work_usd);
+  const budget = usd(job.policy.budget_usd);
+  const settledCount = job.requests.filter(
+    (request) => request.status === "settled"
+  ).length;
+  const denied = job.requests.some(
+    (request) => request.status === "denied"
+  );
+  const averageCall =
+    settledCount > 0
+      ? job.accounting.settled_micro_usd / settledCount
+      : 0;
+  const roomForCalls =
+    averageCall > 0 ? Math.floor(availableForWork / averageCall) : null;
+  const averageNote =
+    averageCall > 0 ? ` Calls have averaged ${microToUsd(averageCall)}.` : "";
+
+  if (
+    denied ||
+    availableForWork <= 0 ||
+    (averageCall > 0 && availableForWork < averageCall)
+  ) {
+    return {
+      level: "exhausted",
+      headline: "No room for another work call",
+      detail:
+        `${available} left for work of ${budget}.${averageNote} The ` +
+        `${usd(job.policy.final_reserve_usd)} final reserve is held for the ` +
+        "final answer only; the governor will deny another work call."
+    };
+  }
+  if (roomForCalls === 1 || (roomForCalls === null && riskBand(job) === "AT_RISK")) {
+    return {
+      level: "at_risk",
+      headline: "Room for about one more work call",
+      detail: `${available} left for work of ${budget}.${averageNote}`
+    };
+  }
+  if (
+    (roomForCalls !== null && roomForCalls <= 3) ||
+    (roomForCalls === null && riskBand(job) === "WATCH")
+  ) {
+    return {
+      level: "watch",
+      headline:
+        roomForCalls !== null
+          ? `Room for about ${roomForCalls} more work calls`
+          : "Approaching budget limit",
+      detail: `${available} left for work of ${budget}.${averageNote}`
+    };
+  }
+  return {
+    level: "ok",
+    headline: "Within budget",
+    detail: `${available} of ${budget} still available for work.${averageNote}`
+  };
+}
+
 function requestStatusTone(status: string): "ok" | "warn" | "bad" {
   const normalized = status.toLowerCase();
   if (
@@ -174,6 +282,12 @@ const VIEW_STYLES = `
     border: 1px solid; border-radius: 999px;
     font-size: 10px; font-weight: 700;
   }
+  .outlook {
+    margin: 12px 0 0; padding: 8px 10px;
+    border: 1px solid; border-left-width: 3px; border-radius: 4px;
+  }
+  .outlook strong { display: block; font-size: 12px; margin-bottom: 2px; }
+  .outlook span { font-size: 11px; color: var(--vscode-descriptionForeground); }
   .hero {
     margin: 12px 0 2px;
     font-size: 19px; font-weight: 700;
@@ -241,6 +355,21 @@ function jobViewHtml(job: JobView): string {
         ? "var(--vscode-charts-yellow)"
         : "var(--vscode-charts-green)";
 
+  const outlook = budgetOutlook(job);
+  const outlookColor =
+    outlook.level === "exhausted" || outlook.level === "at_risk"
+      ? "var(--vscode-charts-red)"
+      : outlook.level === "watch"
+        ? "var(--vscode-charts-yellow)"
+        : "var(--vscode-charts-green)";
+  const outlookBanner =
+    outlook.level === "ok"
+      ? ""
+      : `<div class="outlook" style="border-color:${outlookColor}">
+          <strong style="color:${outlookColor}">${escapeHtml(outlook.headline)}</strong>
+          <span>${escapeHtml(outlook.detail)}</span>
+        </div>`;
+
   const requestRows = job.requests
     .map((request) => {
       const tone = requestStatusTone(request.status);
@@ -266,6 +395,7 @@ function jobViewHtml(job: JobView): string {
   <h2><code>${escapeHtml(job.id)}</code></h2>
   <p class="sub">status: ${escapeHtml(job.status)} · responses ${job.accounting.responses_started}/${job.policy.max_responses}</p>
   <span class="band" style="border-color:${bandColor};color:${bandColor}">${band.replace("_", " ")}</span>
+  ${outlookBanner}
 
   <p class="hero">${usd(job.accounting.committed_usd)} <small>of ${usd(job.policy.budget_usd)} committed</small></p>
   <div class="bar" title="settled + reserved against the budget">
@@ -537,6 +667,37 @@ export function activate(context: vscode.ExtensionContext): void {
         if (phase !== "work" && phase !== "final") {
           return;
         }
+
+        // Forward look: check the job's headroom before spending, so the
+        // limit is visible ahead of time instead of after a denial. Best
+        // effort -- if the pre-check fetch fails, fall through and let the
+        // dispatch itself surface the error.
+        try {
+          const current = await apiRequest<JobView>(
+            `/v1/jobs/${encodeURIComponent(jobId)}`
+          );
+          const outlook = budgetOutlook(current);
+          const overCeiling =
+            current.accounting.committed_micro_usd >=
+            current.policy.budget_micro_usd;
+          const shouldWarn =
+            phase === "work"
+              ? outlook.level === "exhausted" || outlook.level === "at_risk"
+              : overCeiling;
+          if (shouldWarn) {
+            const choice = await vscode.window.showWarningMessage(
+              `${outlook.headline}. ${outlook.detail} Submit this ${phase} call anyway?`,
+              { modal: true },
+              "Submit anyway"
+            );
+            if (choice !== "Submit anyway") {
+              return;
+            }
+          }
+        } catch {
+          // Ignore a failed pre-check; the dispatch below still enforces.
+        }
+
         const requestId = `${phase}:${Date.now()}`;
         try {
           const result = await apiRequest<Record<string, unknown>>(
