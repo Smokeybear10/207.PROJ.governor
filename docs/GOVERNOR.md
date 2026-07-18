@@ -10,13 +10,12 @@
 calculated API cost across all assigned jobs  
 **Prediction status:** Shadow-only until it beats the same controller without
 prediction  
-**Repository status:** The primary POC customer experience is the terminal CLI
-and versioned governed-jobs API. The deterministic enforcement path is
-implemented, and the multi-step review workflow is tested through a scripted
-fake provider. The optional dashboard is a deterministic mechanism walkthrough
-using synthetic fixtures; no live OpenAI call, measured benchmark, or savings
-result exists. The ledger and active workflow state are single-process memory,
-not durable or cross-process safe.
+**Repository status:** The primary POC customer experience is the VS Code
+extension backed by the local versioned governed-jobs API. The deterministic
+enforcement path is implemented, and the multi-step review workflow is tested
+through a scripted fake provider. No live OpenAI call, measured benchmark, or
+savings result exists. The ledger and active workflow state are single-process
+memory, not durable or cross-process safe.
 See `docs/POC_FINDINGS.md` for the implemented boundary and adversarial verdict.
 
 ## 1. Executive Overview
@@ -48,7 +47,7 @@ returns a large log, a deterministic reducer keeps the exit code, failing
 tests, relevant error lines, and an artifact hash instead of inserting the
 entire log into future context.
 
-The scripted dashboard compares:
+The scripted scenarios compare:
 
 1. A hard cap with no context optimization.
 2. A static controller with fixed production-grade hygiene.
@@ -301,9 +300,8 @@ Do not claim:
    reconciled.
 7. A completed final response moves to `validation_required`; the application
    explicitly accepts or rejects it before the job closes.
-8. For a no-key demonstration, the CLI can play the separately labeled
-   synthetic PR-review scenarios and the dashboard can visualize the same
-   fixtures.
+8. For a no-key demonstration, the extension can run the scripted CI-repair
+   fixture and the CLI can play separately labeled synthetic review scenarios.
 
 ### 8.2 Request identity and retrieval
 
@@ -381,7 +379,7 @@ Input preflight -> reservation ledger -> one Responses API call
             |
 Built-in PR-review workflow <-> read-only local repository tools
 
-Optional React dashboard -> synthetic demo API and fixtures
+VS Code extension -> local jobs and CI-repair API
 ```
 
 ### 9.1 Components
@@ -1245,7 +1243,7 @@ Do not describe the benchmark as customer data.
 The adversarial design review and deterministic technical POC are complete.
 They found no fatal single-process enforcement blocker, but the POC did not
 make live OpenAI calls or validate savings. The next step is a real,
-outcome-gated experiment, not broader dashboard work.
+outcome-gated experiment, not broader UI work.
 
 ### 18.1 Thirty-to-forty-five-minute adversarial gate
 
@@ -1296,10 +1294,10 @@ previously unseen tasks that:
 - The run completes in a demo-friendly amount of time.
 
 If these do not hold, change the workload or intervention before promoting the
-scripted dashboard as experimental evidence. A forecast is not required for
+scripted fixtures as experimental evidence. A forecast is not required for
 the technical POC to pass.
 
-## 19. Dashboard Design
+## 19. VS Code Extension Design
 
 The application should be a quiet operational interface, not a marketing
 landing page.
@@ -1414,7 +1412,7 @@ language only after a separately labeled live benchmark exists.
 - Would run the restricted OpenAI adapter and stream actual model/tool events.
 - Would settle provider-reported usage under the pinned rate card.
 - Must keep measured live data distinct from scripted fixtures.
-- Is not implemented or evidenced by the current dashboard.
+- Is not evidenced by the current scripted extension demo.
 
 ### Recommended judging strategy
 
@@ -1443,7 +1441,7 @@ language only after a separately labeled live benchmark exists.
 - Deterministic quality evaluator
 - Trace collection scripts
 - Three-arm analysis
-- Dashboard and timeline
+- Extension activity view and governed trace
 - Replay mode and demo choreography
 
 ### Shared work
@@ -1492,7 +1490,7 @@ language only after a separately labeled live benchmark exists.
 - Reserve final-answer budget.
 - Add admission failure and stop behavior.
 
-### Hours 22-28: evaluation and dashboard
+### Hours 22-28: evaluation and extension
 
 - Run the three frozen policies on holdout tasks.
 - Apply the quality gate before comparing total cost.
@@ -1503,7 +1501,7 @@ language only after a separately labeled live benchmark exists.
 
 - Add replay.
 - Handle provider and tool failures.
-- Verify desktop and mobile layout.
+- Verify the VS Code Activity Bar and editor layouts.
 - Freeze measured results.
 - Rehearse the ninety-second demo.
 
@@ -1535,7 +1533,7 @@ language only after a separately labeled live benchmark exists.
 - Multiple providers
 - Model switching
 - Automatic code patches
-- Organization and team dashboards
+- Organization and team budget views
 - Complex authentication
 - General policy builder
 - Multicalibration
@@ -1662,7 +1660,7 @@ Out of scope for the hackathon, but a production system needs:
 | "The agent will game the budget." | Optimization pressure can cause shortcuts. | Keep success evaluation external and independent. |
 | "Pricing changes." | Dollar forecasts drift. | Store raw usage and versioned rate cards. |
 | "Caching makes cost confusing." | Cached input may use a different rate. | Track cached and uncached input separately. |
-| "This is a dashboard with an animation." | A passive UI has no control value. | Show the actual next request changed and compare governed execution. |
+| "This is just a status panel." | A passive UI has no control value. | Show the extension submitting a request through the governor and the policy changing execution. |
 | "One workflow is too narrow." | The demo is not universal. | Treat narrowness as honest validation and show an adapter-based roadmap. |
 
 ## 28. Competitive Differentiation
@@ -1738,7 +1736,7 @@ cost is compared.
 ### Is the data real?
 
 No. The pull requests, model events, usage, timing, receipts, quality outcomes,
-and calculated list-price costs shown by the dashboard are deterministic
+and calculated list-price costs shown by the extension are deterministic
 scripted fixtures. The adapter and workflow are tested with a fake provider;
 no live OpenAI run or measured savings result exists.
 
@@ -1831,7 +1829,7 @@ Pivot to a simpler hard-budget controller if:
 - The only savings come from stopping unsuccessful jobs.
 
 Failing a kill criterion is useful information. It should happen during the
-POC, not after the dashboard is polished.
+POC, not after the extension is polished.
 
 ## 33. Production Roadmap
 
@@ -1851,7 +1849,7 @@ POC, not after the dashboard is polished.
 - More workflow adapters
 - Model and prompt version tracking
 - Durable trace storage
-- Team-level dashboards
+- Team-level budget views
 
 ### Phase 3: financial control plane
 
@@ -1959,7 +1957,7 @@ POC, not after the dashboard is polished.
 ## 36. Final Recommendation
 
 Governor now demonstrates a narrow deterministic control loop for one AI
-workflow through fake-provider tests and a scripted dashboard:
+workflow through fake-provider tests and a scripted extension flow:
 
 ```text
 count and reserve the next request

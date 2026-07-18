@@ -1,10 +1,7 @@
 node_modules/
 dist/
 coverage/
-playwright-report/
-test-results/
 /artifacts/
 .env
 .DS_Store
 *.log
-.vercel

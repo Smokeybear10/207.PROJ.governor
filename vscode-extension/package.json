@@ -120,7 +120,7 @@
     "test": "vitest run",
     "test:vscode": "npm run compile && node ./out/test/runTest.js",
     "build": "tsc -p .",
-    "package": "vsce package --no-dependencies -o token-governor-vscode.vsix",
+    "package": "npm run build && vsce package --no-dependencies -o token-governor-vscode.vsix",
     "publish:mock": "node scripts/mock-publish.mjs"
   },
   "devDependencies": {

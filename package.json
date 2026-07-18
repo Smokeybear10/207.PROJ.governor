@@ -1,7 +1,7 @@
 {
   "name": "token-governor",
   "version": "0.1.0",
-  "description": "Governor 207: budget-aware AI execution, built at the 2026 Ramp Hackathon.",
+  "description": "Governor 207: budget control for AI agents inside VS Code.",
   "private": true,
   "type": "module",
   "bin": {
@@ -14,45 +14,32 @@
     "type": "git",
     "url": "git+https://github.com/Smokeybear10/207.PROJ.governor.git"
   },
-  "homepage": "https://governor-207.vercel.app/",
   "scripts": {
-    "dev": "concurrently --kill-others -n api,web -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
-    "dev:api": "tsx watch server/main.ts",
-    "dev:web": "vite --host 127.0.0.1",
+    "dev": "tsx watch server/main.ts",
     "governor": "tsx cli/token-governor.ts",
     "station:rehearsal": "tsx station/rehearsal-server.ts",
     "station:demo": "bash station/run-demo.sh",
     "governor:codex": "node cli/codex-governor.mjs",
     "start": "tsx server/main.ts",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:core": "vitest run tests/governor-core.test.ts tests/governor-cost-ledger.test.ts tests/governor-policy.test.ts tests/governor-log-reducer.test.ts",
     "test:api": "vitest run tests/app.test.ts tests/server-startup.test.ts tests/openai-client.test.ts tests/governed-executor.test.ts tests/jobs-api.test.ts tests/cli.test.ts",
-    "test:extension": "vitest run tests/codex-extension.test.ts",
+    "test:codex": "vitest run tests/codex-extension.test.ts",
     "test:watch": "vitest",
-    "test:e2e": "playwright test --pass-with-no-tests",
     "check": "npm run lint && npm test && npm run build"
   },
   "dependencies": {
     "express": "5.2.1",
-    "lucide-react": "1.25.0",
-    "react": "19.2.7",
-    "react-dom": "19.2.7",
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@playwright/test": "1.61.1",
     "@types/express": "5.0.6",
     "@types/node": "18.19.130",
-    "@types/react": "19.2.17",
-    "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "4.7.0",
-    "concurrently": "9.2.4",
     "tsx": "4.23.1",
     "typescript": "5.9.3",
-    "vite": "6.4.3",
     "vitest": "3.2.7"
   }
 }

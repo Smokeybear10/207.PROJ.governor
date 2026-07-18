@@ -1,57 +1,50 @@
 # Governor 207 - Work Summary
 
-A spend firewall for AI agents. Every model call goes through a deterministic
-**count → price → reserve → cap → dispatch → settle** pipeline, so cost is
-enforced before the call, not discovered after it.
+Governor 207 is a VS Code and Cursor extension backed by a local budget-control
+service. It enforces a deterministic
+`count -> price -> reserve -> cap -> dispatch -> settle` pipeline around every
+model call.
 
-## Architecture (4 layers)
+## Product surface
 
-1. **Frontend** - React operations dashboard and CI-Repair panel (`src/`).
-2. **Shared API** — Express app (`server/app.ts`): `/api/repair/runs`, `/v1/jobs*`, uniform JSON error envelope.
-3. **Repair layer** (`server/repair/**`) — governed autonomous CI-repair agent.
-4. **Governor service** (`server/jobs/service.ts`) — the single spend authority; count/price/reserve/cap/dispatch/settle over `server/governor/**` + `server/runtime/**`.
+1. **VS Code extension** (`vscode-extension/`) - job controls, spend and risk
+   status, prompt submission, response finalization, and CI-repair results.
+2. **Local API** (`server/app.ts`) - health, governed jobs, and CI-repair
+   routes used by the extension.
+3. **Repair workflow** (`server/repair/`) - sandboxed repair tools and a sealed
+   evaluator.
+4. **Governor service** (`server/jobs/`, `server/runtime/`,
+   `server/governor/`) - the single spend authority.
 
-## What we shipped this session
+The project does not ship or host a website. Web-only frontend and deployment
+code are not part of the extension deliverable.
 
-- **Repair layer routed through the governor service.** Repair no longer embeds its own ledger; it drives `GovernedJobService` via a typed adapter (`server/repair/governor-client.ts` → `openRepairSession`). Frontend → shared API → repair → governor service.
-- **CI-Repair panel in the frontend** wired to `POST /api/repair/runs`.
-- **Sealed evaluator hardened.** Final verification runs in a **fresh pristine checkout** that carries over only the agent's allowlisted file contents (`verifyFinalState` in `server/repair/sandbox.ts`). Tampering outside the allowlist can't fake a green build. Added an anti-gaming test.
-- **VS Code / Cursor extension** — interactive UI (see `EXTENSION.md`): toolbar, live budget dashboard, in-panel CI-repair results + governed trace. Logo + marketplace README added, packaged as a `.vsix`, installed locally.
-- **Docs reconciled** (`README.md`, `docs/CI_REPAIR.md`) to the service-driven architecture.
+## Implemented
+
+- Deterministic per-job dollar budgets with conservative reservation.
+- Output caps and explicit settlement from provider-reported usage.
+- Retry suppression, bounded log reduction, and content-addressed artifacts.
+- VS Code Activity Bar view, status bar risk state, and governed commands.
+- Sandboxed CI-repair with allowlisted edits and isolated final evaluation.
+- Scripted, hybrid, and live provider modes.
+- Installable VSIX packaging and extension CI.
+
+## Run
+
+```bash
+npm start
+```
+
+Then install or launch the extension from `vscode-extension/`. The extension
+connects to `http://127.0.0.1:8787` by default.
 
 ## Verification
 
-- `npx tsc --noEmit`: clean.
-- `npx vitest run`: **238/238** passing (23 files).
-- `vite build`: clean.
-- Extension: typecheck clean, 7/7 unit tests, 2/2 VS Code integration tests,
-  zero audit findings, and VSIX package OK.
-- Live smoke: `POST /api/repair/runs` (fake `broken-sum`) → `201 repaired`, sealed eval passed, spend ~$0.0045.
-
-## How it saves money (cost-control tactics)
-
-Implemented ✅:
-
-- Count before you call (free exact-size preflight)
-- Set money aside, then refund (reserve → settle)
-- Cap the answer length (`max_output_tokens`)
-- Don't repeat dead-end work (retry-fingerprint suppression)
-- Shrink giant logs (reduce test logs to the failing lines)
-- Reuse instead of resend (content-addressed artifacts)
-- Always keep enough to finish (protected final-answer reserve)
-- Quit while you're ahead (refuse over-budget calls, stop cleanly)
-- Use the cheapest model that works (low-cost default)
-
-Roadmap ◻:
-
-- Only run the tests that matter
-- Look before you read (fault localization)
-- Ignore unreliable/flaky tests
-
-## Run it
-
 ```bash
-npm start                      # governor API on http://127.0.0.1:8787 (scripted, $0)
-OPENAI_API_KEY=... npm start   # live OpenAI calls
-npm run dev:web                # React dashboard
+npm run check
+cd vscode-extension
+npm run typecheck
+npm test
+npm run test:vscode
+npm run package
 ```

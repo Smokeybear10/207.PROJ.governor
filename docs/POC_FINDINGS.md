@@ -9,8 +9,9 @@ place a conservative, auditable cost boundary around each model response before
 dispatch. It does not support a forecasting, savings, invoice-control, or
 production-readiness claim.
 
-The dashboard is a scripted mechanism walkthrough, not a holdout benchmark.
-Its hard-cap, static, and predictive-shadow rows are deterministic fixtures.
+The scripted local scenarios are a mechanism walkthrough, not a holdout
+benchmark. Their hard-cap, static, and predictive-shadow results are
+deterministic fixtures.
 Static and shadow have identical synthetic cost because the shadow signal is
 not allowed to act. Separately, the multi-step review workflow is exercised
 against a scripted fake Responses provider, not a live OpenAI account.
@@ -33,7 +34,7 @@ against a scripted fake Responses provider, not a live OpenAI account.
   deterministic test-log reduction
 - Bounded content-addressed raw artifact storage
 - A multi-step pull-request review tested with a scripted fake provider
-- Reconciled synthetic receipts and a quality-gated comparison UI
+- Reconciled synthetic receipts and quality-gated comparison fixtures
 
 The tests establish internal accounting invariants and deterministic behavior.
 They do not establish provider behavior under a real account or distributed

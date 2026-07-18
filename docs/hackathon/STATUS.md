@@ -8,7 +8,7 @@ before quoting anything.
 
 A deterministic budget-control layer for AI agents is built and green
 (238 tests, clean typecheck) across a CLI, a jobs API, two governed
-workloads, a dashboard, and a packaged VS Code extension. The single
+workloads, and a packaged VS Code extension. The single
 biggest open risk is that **no live OpenAI run has been confirmed** —
 everything demoed so far uses scripted or synthetic providers.
 
@@ -22,7 +22,6 @@ everything demoed so far uses scripted or synthetic providers.
 | PR-review workload | Multi-step review with allowlisted repo tools | `server/review/` | Thomas |
 | CI-repair workload | Governed repair loop: sandbox, tools, budget tools, sealed evaluator | `server/repair/` | Thomas / Aryan |
 | Sealed evaluator | Scores repairs against isolated ground truth that can't be gamed | `server/repair/evaluation.ts` | Aryan |
-| Dashboard | React UI: operations dashboard and CI-Repair panel | `src/` | Aarav (pitch pass), Thomas |
 | VS Code extension | Sidebar spend/risk, budget outlook, send prompt, submit selection | `vscode-extension/` | Aarav (built), Aryan (packaging + client libs) |
 | Station tooling | Rehearsal server, scripted demo script, eval runner | `station/` | Aarav |
 | Docs | Announcements, strategy, tasks, interventions, demo map, this report | `docs/hackathon/` | Aarav |
@@ -30,7 +29,7 @@ everything demoed so far uses scripted or synthetic providers.
 ## How it works (the loop)
 
 ```
-CLI / extension / dashboard
+CLI / VS Code extension
       -> jobs API (/v1/jobs)
       -> governed executor
       -> governor core  (count -> price -> reserve -> cap -> settle)
@@ -54,7 +53,7 @@ outcome) per the POC findings.
 
 - **Typecheck:** clean (`npm run typecheck`).
 - **Tests:** 238 passing (`npm test`).
-- **Build:** `npm run build` (tsc + vite).
+- **Build:** `npm run build` (TypeScript).
 - **Flaky test:** the repair-sandbox test (`broken-sum`) is timing-sensitive
   and has failed intermittently on a loaded machine, then passed on rerun.
   Not a logic bug, but re-run before trusting a red result.
@@ -85,7 +84,7 @@ outcome) per the POC findings.
 ## Truth boundary (say this precisely)
 
 - Enforcement kernel, receipts, and evaluator are **real code, tested**.
-- Dashboard scenarios and benchmark are **labeled synthetic fixtures**.
+- Scripted scenarios and benchmark data are **labeled synthetic fixtures**.
 - A live OpenAI run, once captured, is the only thing labeled **live**.
 - Never call a scripted or replayed run "live."
 

@@ -18,7 +18,8 @@ is exactly where reserve/cap/settle and retry-suppression earn their value.
 CI-repair is the third of TokenGovernor's four layers (see
 [`../README.md`](../README.md#architecture)):
 
-1. Frontend — React dashboard with a CI-Repair panel (`src/`).
+1. VS Code extension — editor-native CI-Repair controls
+   (`vscode-extension/`).
 2. Shared API — Express app exposing `POST /api/repair/runs` (`server/app.ts`).
 3. **Repair layer — this feature** (`server/repair/**`).
 4. Governor service — the enforcement engine the repair layer drives.

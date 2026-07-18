@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2022",
     "useDefineForClassFields": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022", "DOM"],
     "allowJs": false,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -14,17 +14,12 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "jsx": "react-jsx",
     "types": ["node", "vitest/globals"]
   },
   "include": [
-    "api",
-    "src",
     "server",
     "cli",
     "station",
-    "vite.config.ts",
-    "vitest.config.ts",
-    "playwright.config.ts"
+    "vitest.config.ts"
   ]
 }
