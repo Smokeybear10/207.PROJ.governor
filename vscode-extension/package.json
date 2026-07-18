@@ -1,0 +1,76 @@
+{
+  "name": "token-governor-vscode",
+  "displayName": "TokenGovernor",
+  "description": "Budget control for AI jobs inside the editor: create governed jobs, submit work through the governor, and watch spend and risk live.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "ramp-hackathon",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "tokenGovernor.healthCheck",
+        "category": "Governor",
+        "title": "Health Check"
+      },
+      {
+        "command": "tokenGovernor.createJob",
+        "category": "Governor",
+        "title": "Create Job"
+      },
+      {
+        "command": "tokenGovernor.setActiveJob",
+        "category": "Governor",
+        "title": "Set Active Job"
+      },
+      {
+        "command": "tokenGovernor.openJobPanel",
+        "category": "Governor",
+        "title": "Open Job Panel"
+      },
+      {
+        "command": "tokenGovernor.submitSelection",
+        "category": "Governor",
+        "title": "Submit Selection Through Governor"
+      },
+      {
+        "command": "tokenGovernor.finalize",
+        "category": "Governor",
+        "title": "Finalize Pending Response"
+      }
+    ],
+    "configuration": {
+      "title": "TokenGovernor",
+      "properties": {
+        "tokenGovernor.apiBaseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8787",
+          "description": "Base URL of the TokenGovernor API server."
+        },
+        "tokenGovernor.pollIntervalMs": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 500,
+          "description": "How often to refresh the active job, in milliseconds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p ."
+  },
+  "devDependencies": {
+    "@types/node": "20.19.9",
+    "@types/vscode": "1.85.0",
+    "typescript": "5.9.3"
+  }
+}
