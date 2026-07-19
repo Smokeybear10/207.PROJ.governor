@@ -35,6 +35,7 @@ await build({
   // root also has compatible backend dependencies installed.
   alias: {
     express: path.join(extensionRoot, "node_modules", "express", "index.js"),
+    "proper-lockfile": path.join(extensionRoot, "node_modules", "proper-lockfile", "index.js"),
     zod: path.join(extensionRoot, "node_modules", "zod", "index.js")
   },
   banner: {

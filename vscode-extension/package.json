@@ -1,7 +1,7 @@
 {
   "name": "token-governor-vscode",
   "displayName": "Governor",
-  "description": "Local budget control for AI jobs inside the editor: watch spend, reservations, and risk live, and run governed CI-repair — all capped by Governor.",
+  "description": "Set spending limits for AI requests and review proposed Node test repairs in VS Code.",
   "version": "0.2.0",
   "private": true,
   "publisher": "governor",
@@ -43,7 +43,17 @@
       {
         "command": "tokenGovernor.setActiveJob",
         "category": "Governor",
-        "title": "Set Active Job"
+        "title": "Browse Saved Jobs"
+      },
+      {
+        "command": "tokenGovernor.viewResponses",
+        "category": "Governor",
+        "title": "View Saved Responses"
+      },
+      {
+        "command": "tokenGovernor.exportReport",
+        "category": "Governor",
+        "title": "Export Job Report"
       },
       {
         "command": "tokenGovernor.openJobPanel",
@@ -66,9 +76,19 @@
         "title": "Finalize Pending Response"
       },
       {
+        "command": "tokenGovernor.repairWorkspace",
+        "category": "Governor",
+        "title": "Repair Workspace Test"
+      },
+      {
+        "command": "tokenGovernor.reviewWorkspaceRepair",
+        "category": "Governor",
+        "title": "Review Workspace Repair"
+      },
+      {
         "command": "tokenGovernor.runRepair",
         "category": "Governor",
-        "title": "Run Governed CI-Repair"
+        "title": "Run Sample CI Repair"
       },
       {
         "command": "tokenGovernor.setOpenAiApiKey",
@@ -149,7 +169,7 @@
         "tokenGovernor.defaultFixtureId": {
           "type": "string",
           "default": "broken-sum",
-          "description": "Repair fixture used by the Run Governed CI-Repair command."
+          "description": "Bundled fixture used by Run Sample CI Repair. Samples use scripted responses without model calls."
         },
         "tokenGovernor.providerMode": {
           "type": "string",
@@ -159,7 +179,8 @@
             "live"
           ],
           "default": "fake",
-          "description": "Provider mode used by governed CI-Repair runs."
+          "description": "Legacy sample provider mode.",
+          "deprecationMessage": "Samples now always use scripted responses without model calls. Workspace repairs use your configured OpenAI provider."
         }
       }
     }
@@ -182,18 +203,25 @@
     "@vscode/vsce": "^3.9.2",
     "esbuild": "0.28.1",
     "express": "5.2.1",
-    "glob": "^13.0.6",
+    "glob": "^14.0.4",
     "iconv-lite": "0.7.3",
     "mime-types": "3.0.2",
     "mocha": "^11.7.6",
+    "proper-lockfile": "4.1.2",
     "typescript": "5.9.3",
-    "vitest": "^4.1.10",
-    "zod": "4.4.3"
+    "vitest": "^4.1.12",
+    "zod": "4.6.7"
   },
   "overrides": {
     "mocha": {
       "diff": "8.0.3",
-      "serialize-javascript": "7.0.7"
+      "serialize-javascript": "7.1.3",
+      "glob": "$glob",
+      "minimatch": "11.0.5"
+    },
+    "@vscode/vsce": {
+      "glob": "$glob",
+      "minimatch": "11.0.5"
     }
   }
 }

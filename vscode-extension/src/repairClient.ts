@@ -219,7 +219,7 @@ function parseEvaluation(value: unknown): RepairEvaluation | null {
   };
 }
 
-function parseResult(value: unknown): RepairResult {
+export function parseRepairResult(value: unknown): RepairResult {
   const record = requireRecord(value, "result");
   if (record.status !== "repaired" && record.status !== "not_repaired") {
     invalidResponse(
@@ -267,12 +267,18 @@ function parseRunResponse(value: unknown): RepairRunResponse {
     model: requireString(record.model, "model"),
     rateCardVersion: requireString(record.rateCardVersion, "rateCardVersion"),
     policy: record.policy,
-    result: parseResult(record.result)
+    result: parseRepairResult(record.result)
   };
 }
 
 function parseHealth(value: unknown): RepairHealth {
-  const record = requireRecord(value, "response");
+  if (!isRecord(value) || value.service !== "token-governor") {
+    throw new GovernorApiError("The configured endpoint is not a Governor service.", 0, "INVALID_SERVICE");
+  }
+  const record = value;
+  if (record.status !== "ready") {
+    throw new GovernorApiError("The Governor service is not ready.", 0, "SERVICE_NOT_READY");
+  }
   const health: RepairHealth = {
     service: requireString(record.service, "service"),
     status: requireString(record.status, "status"),

@@ -27,7 +27,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -62,12 +62,9 @@ jobs:
         working-directory: vscode-extension
         run: npm test
 
-      - name: Install xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb
-
       - name: VS Code integration tests
         working-directory: vscode-extension
-        run: xvfb-run -a npm run test:vscode
+        run: npm run test:vscode
 
       - name: Package VSIX
         working-directory: vscode-extension

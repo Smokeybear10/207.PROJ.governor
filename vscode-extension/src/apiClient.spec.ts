@@ -120,6 +120,44 @@ describe("GovernorHttpClient", () => {
     expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 
+  it.each([200, 503])("preserves timeout classification while reading an HTTP %s body", async (status) => {
+    const client = new GovernorHttpClient({
+      baseUrl: "http://127.0.0.1:8787",
+      timeoutMs: 5,
+      fetchImpl: (async (_url, init) => ({
+        ok: status === 200,
+        status,
+        json: () => new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        })
+      })) as typeof fetch
+    });
+
+    await expect(client.request("/api/health")).rejects.toMatchObject({ code: "TIMEOUT", status: 0 });
+  });
+
+  it.each([200, 503])("preserves caller cancellation while reading an HTTP %s body", async (status) => {
+    let reading!: () => void;
+    const bodyStarted = new Promise<void>((resolve) => { reading = resolve; });
+    const client = new GovernorHttpClient({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: (async (_url, init) => ({
+        ok: status === 200,
+        status,
+        json: () => new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          reading();
+        })
+      })) as typeof fetch
+    });
+    const cancellation = new AbortController();
+    const pending = client.request("/api/health", {}, cancellation.signal);
+    await bodyStarted;
+    cancellation.abort();
+
+    await expect(pending).rejects.toMatchObject({ code: "CANCELLED", status: 0 });
+  });
+
   it("rejects malformed successful JSON responses", async () => {
     const client = new GovernorHttpClient({
       baseUrl: "http://127.0.0.1:8787",

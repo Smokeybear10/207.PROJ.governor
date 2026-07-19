@@ -1,7 +1,9 @@
 import { randomBytes } from "node:crypto";
 
 import {
+  jobControls,
   riskBand,
+  type JobControls,
   type JobView
 } from "./jobModel";
 import {
@@ -15,8 +17,12 @@ export type PanelAction =
   | "setActiveJob"
   | "submitSelection"
   | "sendPrompt"
+  | "viewResponses"
+  | "exportReport"
   | "finalize"
-  | "runRepair";
+  | "runRepair"
+  | "repairWorkspace"
+  | "reviewWorkspaceRepair";
 
 export type RenderMessage = {
   api?: string;
@@ -28,6 +34,8 @@ export type RenderMessage = {
   repairHtml?: string;
   busy?: boolean;
   busyLabel?: string;
+  jobControls?: JobControls;
+  hasActiveJob?: boolean;
 };
 
 const PANEL_ACTIONS = new Set<PanelAction>([
@@ -35,8 +43,12 @@ const PANEL_ACTIONS = new Set<PanelAction>([
   "setActiveJob",
   "submitSelection",
   "sendPrompt",
+  "viewResponses",
+  "exportReport",
   "finalize",
-  "runRepair"
+  "runRepair",
+  "repairWorkspace",
+  "reviewWorkspaceRepair"
 ]);
 
 const MAX_VISIBLE_REQUESTS = 8;
@@ -77,7 +89,7 @@ function requestStatusTone(status: string): "ok" | "warn" | "bad" {
   ) {
     return "warn";
   }
-  return "ok";
+  return normalized === "settled" ? "ok" : "warn";
 }
 
 const VIEW_STYLES = `
@@ -105,7 +117,7 @@ const VIEW_STYLES = `
     border-radius: 4px;
     color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
     background: var(--vscode-button-secondaryBackground);
-    font: 600 11px/1.35 var(--vscode-font-family);
+    font: 500 12px/1.35 var(--vscode-font-family);
     letter-spacing: 0;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -120,7 +132,7 @@ const VIEW_STYLES = `
     outline-offset: 2px;
   }
   button:disabled {
-    cursor: wait;
+    cursor: default;
     opacity: 0.62;
   }
   button.primary {
@@ -148,15 +160,10 @@ const VIEW_STYLES = `
     font-size: 14px;
     font-weight: 700;
   }
-  .edition {
-    flex: 0 0 auto;
-    color: var(--muted);
-    font-size: 10px;
-  }
   .service-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 5px 12px;
     margin-top: 8px;
   }
   .service-state,
@@ -165,17 +172,9 @@ const VIEW_STYLES = `
     min-width: 0;
     align-items: center;
     gap: 5px;
-    padding: 2px 6px;
-    border: 1px solid var(--border);
-    border-radius: 3px;
     color: var(--muted);
-    font-size: 10px;
+    font-size: 11px;
     line-height: 1.4;
-  }
-  .service-state.online,
-  .provider-state.ok {
-    color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
-    border-color: color-mix(in srgb, currentColor 55%, transparent);
   }
   .service-state.offline,
   .provider-state.bad {
@@ -185,13 +184,6 @@ const VIEW_STYLES = `
   .provider-state.warn {
     color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow));
     border-color: color-mix(in srgb, currentColor 55%, transparent);
-  }
-  .status-dot {
-    width: 6px;
-    height: 6px;
-    flex: 0 0 auto;
-    border-radius: 50%;
-    background: currentColor;
   }
   .endpoint {
     margin-top: 6px;
@@ -231,9 +223,13 @@ const VIEW_STYLES = `
   }
   .primary-actions {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(88px, 0.62fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: 6px;
   }
+  .primary-actions + .job-actions { margin-top: 6px; }
+  .workflow-note { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+  .prompt-controls { margin-top: 14px; }
+  .prompt-controls summary { padding: 10px 0; color: var(--vscode-foreground); font-size: 12px; }
   .action-label,
   .section-label {
     margin: 12px 0 6px;
@@ -277,6 +273,7 @@ const VIEW_STYLES = `
     justify-content: space-between;
     gap: 8px;
   }
+  .section-heading > div { min-width: 0; flex: 1; }
   .section-label {
     margin: 0 0 3px;
   }
@@ -455,17 +452,6 @@ const VIEW_STYLES = `
   }
   .repair-card {
     margin-top: 7px;
-    padding: 10px;
-    border: 1px solid var(--border);
-    border-left-width: 3px;
-    border-radius: 5px;
-    background: var(--vscode-editorWidget-background);
-  }
-  .repair-card.repaired {
-    border-left-color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
-  }
-  .repair-card.failed {
-    border-left-color: var(--vscode-testing-iconFailed, var(--vscode-charts-red));
   }
   .repair-head {
     display: flex;
@@ -483,10 +469,12 @@ const VIEW_STYLES = `
     white-space: nowrap;
   }
   .spend {
-    flex: 0 0 auto;
+    min-width: 0;
     font-variant-numeric: tabular-nums;
     font-weight: 600;
   }
+  .cost-label { color: var(--muted); font-size: 11px; font-weight: 400; }
+  .sample-note { margin: 8px 0; }
   .checks {
     display: flex;
     flex-wrap: wrap;
@@ -550,7 +538,7 @@ const VIEW_STYLES = `
       flex-direction: column;
       gap: 1px;
     }
-    .edition { flex: 1 1 auto; }
+    .repair-head { align-items: flex-start; flex-direction: column; gap: 4px; }
   }
   @media (prefers-reduced-motion: reduce) {
     .progress-track::after { animation: none; width: 100%; }
@@ -569,32 +557,53 @@ export function shellHtml(cspSource: string): string {
     const endpoint = document.getElementById('api');
     const progress = document.getElementById('progress');
     const operation = document.getElementById('operation');
-    let providerMode = null;
+    const actionHint = document.getElementById('action-hint');
     let providerConfigured = null;
+    let connected = false;
+    let busy = false;
+    let hasActiveJob = false;
+    let controls = { canSubmit: false, canFinalize: false, canViewResponses: false };
 
-    function titleCase(value) {
-      return value ? value.charAt(0).toUpperCase() + value.slice(1) : '';
+    function renderControls() {
+      for (const button of buttons) {
+        const action = button.getAttribute('data-action');
+        let allowed = false;
+        if (action === 'createJob' || action === 'setActiveJob') allowed = true;
+        if (action === 'sendPrompt' || action === 'submitSelection') {
+          allowed = controls.canSubmit === true && providerConfigured === true;
+        }
+        if (action === 'finalize') allowed = controls.canFinalize === true;
+        if (action === 'viewResponses') allowed = controls.canViewResponses === true;
+        if (action === 'exportReport') allowed = hasActiveJob;
+        if (action === 'repairWorkspace') allowed = providerConfigured === true;
+        if (action === 'reviewWorkspaceRepair') allowed = true;
+        if (action === 'runRepair') allowed = true;
+        button.disabled = !connected || busy || !allowed;
+      }
+      actionHint.textContent = !connected
+        ? 'Connect to Governor to view saved jobs or send requests.'
+        : providerConfigured === false
+          ? 'The sample runs without a model or API key. Your own files require an OpenAI API key.'
+          : '';
+      actionHint.hidden = actionHint.textContent === '';
+      document.getElementById('job').hidden = !hasActiveJob;
     }
 
     function renderProvider() {
       provider.className = 'provider-state';
-      if (!providerMode) {
-        providerLabel.textContent = 'Checking provider';
-      } else if (providerMode === 'fake') {
-        providerLabel.textContent = 'Deterministic mode';
-      } else if (providerConfigured === true) {
+      if (providerConfigured === true) {
         provider.classList.add('ok');
-        providerLabel.textContent = titleCase(providerMode) + ' provider ready';
+        providerLabel.textContent = 'OpenAI configured';
       } else if (providerConfigured === false) {
-        provider.classList.add('warn');
-        providerLabel.textContent = titleCase(providerMode) + ' needs API key';
+        providerLabel.textContent = 'No API key';
       } else {
-        providerLabel.textContent = titleCase(providerMode) + ' provider';
+        providerLabel.textContent = 'Checking provider';
       }
     }
 
     for (const button of buttons) {
       button.addEventListener('click', function () {
+        if (button.disabled) return;
         vscode.postMessage({
           type: 'action',
           action: button.getAttribute('data-action')
@@ -611,16 +620,22 @@ export function shellHtml(cspSource: string): string {
         endpoint.title = message.api;
       }
       if (message.connected !== undefined) {
+        connected = message.connected === true;
         connection.className = 'service-state ' + (message.connected ? 'online' : 'offline');
-        connectionLabel.textContent = message.connected ? 'Service online' : 'Service unavailable';
-      }
-      if (message.providerMode !== undefined) {
-        providerMode = message.providerMode;
+        connectionLabel.textContent = message.connected ? 'Service ready' : 'Service unavailable';
       }
       if (Object.prototype.hasOwnProperty.call(message, 'providerConfigured')) {
         providerConfigured = message.providerConfigured;
       }
       renderProvider();
+      if (message.jobControls !== undefined) {
+        controls = message.jobControls;
+      }
+      if (message.hasActiveJob !== undefined) {
+        const nextHasJob = message.hasActiveJob === true;
+        if (nextHasJob && !hasActiveJob) document.getElementById('prompt-controls').open = true;
+        hasActiveJob = nextHasJob;
+      }
 
       if (message.statusHtml !== undefined) {
         document.getElementById('status').innerHTML = message.statusHtml;
@@ -632,16 +647,17 @@ export function shellHtml(cspSource: string): string {
         document.getElementById('repair').innerHTML = message.repairHtml;
       }
       if (message.busy !== undefined) {
-        const busy = Boolean(message.busy);
+        busy = Boolean(message.busy);
         document.body.classList.toggle('is-busy', busy);
         document.body.setAttribute('aria-busy', String(busy));
         progress.hidden = !busy;
-        for (const button of buttons) button.disabled = busy;
         operation.textContent = busy ? (message.busyLabel || 'Governor is working...') : '';
       }
+      renderControls();
     });
 
     renderProvider();
+    renderControls();
     vscode.postMessage({ type: 'ready' });
   `;
 
@@ -657,33 +673,41 @@ export function shellHtml(cspSource: string): string {
   <header class="app-header">
     <div class="identity-row">
       <div class="brand">Governor</div>
-      <div class="edition">Project 207</div>
     </div>
     <div class="service-row" aria-live="polite">
       <span class="service-state" id="connection">
-        <i class="status-dot" aria-hidden="true"></i>
         <span id="connection-label">Checking service</span>
       </span>
       <span class="provider-state" id="provider">
         <span id="provider-label">Checking provider</span>
       </span>
     </div>
-    <div class="endpoint" id="api"></div>
+    <details><summary>Connection</summary><div class="endpoint" id="api"></div></details>
   </header>
   <div class="progress-track" id="progress" role="progressbar" aria-label="Governor operation in progress" hidden></div>
   <div class="operation" id="operation" role="status" aria-live="polite"></div>
   <nav class="actions" aria-label="Governor actions">
     <div class="primary-actions">
-      <button class="primary" data-action="runRepair" title="Run governed CI repair">Run CI repair</button>
-      <button data-action="sendPrompt" title="Send a prompt through the active job">Send prompt</button>
+      <button class="primary" data-action="repairWorkspace" title="Repair selected native Node tests in an isolated copy">Repair Node tests</button>
     </div>
-    <div class="action-label">Job controls</div>
+    <div class="job-actions">
+      <button data-action="reviewWorkspaceRepair">Review repair</button>
+      <button data-action="runRepair" title="Run the scripted example locally, with no model call or charge">Run sample</button>
+    </div>
+    <p class="workflow-note">macOS · Self-contained JS/TS tests using <code>node:test</code>.</p>
+    <p class="empty" id="action-hint" role="status"></p>
+    <details class="prompt-controls" id="prompt-controls">
+    <summary>Prompt jobs</summary>
     <div class="job-actions">
       <button data-action="createJob">New job</button>
-      <button data-action="setActiveJob">Switch job</button>
+      <button data-action="setActiveJob">Saved jobs</button>
+      <button data-action="sendPrompt" title="Send a prompt through the active job">Send prompt</button>
       <button data-action="submitSelection" title="Submit the current editor selection">Submit selection</button>
-      <button data-action="finalize" title="Accept or reject the pending final response">Finalize</button>
+      <button data-action="finalize" title="Accept or reject the pending final response">Review final answer</button>
+      <button data-action="viewResponses" title="Read a saved response without sending a new request">Saved responses</button>
+      <button data-action="exportReport" title="Export this job's accounting without prompts or model output">Export report</button>
     </div>
+    </details>
   </nav>
   <main>
     <div id="status" aria-live="polite"></div>
@@ -704,6 +728,7 @@ export function emptyJobHtml(message: string): string {
 
 export function jobSectionHtml(job: JobView): string {
   const band = riskBand(job);
+  const controls = jobControls(job);
   const budget = Math.max(1, job.policy.budget_micro_usd);
   const settledPercent = Math.min(
     100,
@@ -749,6 +774,8 @@ export function jobSectionHtml(job: JobView): string {
       <span class="risk ${bandClass}">${band.replace("_", " ")}</span>
     </div>
 
+    <p class="banner ${job.status === "reconciliation_required" ? "bad" : "info"}">${escapeHtml(controls.message)}</p>
+
     <div class="budget-summary">
       <div class="budget-amount">$${escapeHtml(job.accounting.committed_usd)}</div>
       <div class="budget-caption">committed of $${escapeHtml(job.policy.budget_usd)}</div>
@@ -791,12 +818,12 @@ function check(label: string, ok: boolean): string {
 export function repairSectionHtml(run: RepairRunResponse): string {
   const result = run.result;
   const repaired = result.status === "repaired";
+  const scripted = run.mode !== "live";
   const evaluation = result.evaluation;
   const checks = evaluation
     ? [
-        check("Evaluation", evaluation.passed),
         check("Tests", evaluation.targetPassed),
-        check("Policy", evaluation.policyRespected),
+        check("File policy", evaluation.policyRespected),
         `<span class="check neutral">Exit ${evaluation.exitCode}</span>`,
         `<span class="check neutral">${result.toolCalls} tool calls</span>`
       ].join("")
@@ -827,17 +854,18 @@ export function repairSectionHtml(run: RepairRunResponse): string {
     : "";
 
   return `<section class="section">
-    <p class="section-label">Latest CI repair</p>
+    <p class="section-label">${scripted ? "Last scripted sample" : "Last bundled repair"}</p>
     <div class="repair-card ${repaired ? "repaired" : "failed"}">
       <div class="repair-head">
-        <span class="verdict ${repaired ? "tone-ok" : "tone-bad"}">${repaired ? "Repaired" : "Not repaired"}</span>
-        <span class="spend">${escapeHtml(formatMicroUsd(result.settledMicroUsd))}</span>
+        <span class="verdict ${repaired ? "" : "tone-bad"}">${scripted ? (repaired ? "Sample passed" : "Sample failed") : (repaired ? "Tests passed" : "Not repaired")}</span>
+        <span class="spend"><span class="cost-label">${scripted ? "Simulated cost" : "Model cost"}</span> ${escapeHtml(formatMicroUsd(result.settledMicroUsd))}</span>
       </div>
-      <p class="sub">${escapeHtml(run.fixtureId)} &middot; ${escapeHtml(run.mode)} &middot; ${escapeHtml(run.model || "n/a")}${result.reason ? ` &middot; ${escapeHtml(result.reason)}` : ""}</p>
+      ${scripted ? `<p class="sample-note">${run.mode === "fake" ? "Scripted patch and usage. No model call or charge." : "Scripted patch and usage with live token counting. No model-generated repair."}</p>` : ""}
+      <p class="sub">${escapeHtml(run.fixtureId)}${scripted ? "" : ` &middot; ${escapeHtml(run.model || "n/a")}`}${result.reason ? ` &middot; ${escapeHtml(result.reason)}` : ""}</p>
       <div class="checks">${checks}</div>
       ${violations}
       ${finalText}
-      <details><summary>Governed trace (${result.trace.length})</summary>${trace}</details>
+      <details><summary>Execution log (${result.trace.length})</summary>${trace}</details>
     </div>
   </section>`;
 }

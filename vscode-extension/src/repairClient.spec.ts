@@ -187,8 +187,8 @@ describe("RepairClient.health", () => {
   it("GETs /api/health and normalizes the payload", async () => {
     const fetchImpl = vi.fn(async () =>
       jsonResponse(200, {
-        service: "governor",
-        status: "ok",
+        service: "token-governor",
+        status: "ready",
         mode: "fake",
         providerConfigured: false,
         governedApi: true
@@ -206,11 +206,34 @@ describe("RepairClient.health", () => {
     expect(url).toBe("http://127.0.0.1:8787/api/health");
     expect(init.method).toBe("GET");
     expect(health).toEqual({
-      service: "governor",
-      status: "ok",
+      service: "token-governor",
+      status: "ready",
       mode: "fake",
       providerConfigured: false,
       governedApi: true
     });
+  });
+
+  it.each([
+    ["unrelated-server", "ready", "INVALID_SERVICE"],
+    ["token-governor", "failed", "SERVICE_NOT_READY"]
+  ])("rejects service %s with status %s", async (service, status, code) => {
+    const client = new RepairClient({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: vi.fn(async () => jsonResponse(200, {
+        service, status, mode: "live", providerConfigured: true
+      })) as typeof fetch
+    });
+
+    await expect(client.health()).rejects.toMatchObject({ code, status: 0 });
+  });
+
+  it.each([null, [], "ready", {}])("rejects malformed identity evidence: %j", async (body) => {
+    const client = new RepairClient({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: vi.fn(async () => jsonResponse(200, body)) as typeof fetch
+    });
+
+    await expect(client.health()).rejects.toMatchObject({ code: "INVALID_SERVICE", status: 0 });
   });
 });

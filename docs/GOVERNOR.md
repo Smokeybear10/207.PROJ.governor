@@ -13,9 +13,14 @@ prediction
 **Repository status:** The primary POC customer experience is the VS Code
 extension backed by the local versioned governed-jobs API. The deterministic
 enforcement path is implemented, and the multi-step review workflow is tested
-through a scripted fake provider. No live OpenAI call, measured benchmark, or
-savings result exists. The ledger and active workflow state are single-process
-memory, not durable or cross-process safe.
+through a scripted fake provider. Workspace repairs accept approved native Node
+test snapshots on macOS, save partial patches, and require diff review before
+applying changes. Editor samples always use scripted responses and label costs
+as simulated. Eight authored regression cases test the benchmark harness; they
+do not measure model quality. No live benchmark or savings result exists.
+The local API persists job ledgers and response receipts
+with atomic file replacement and one writer per storage directory. Interrupted
+provider calls retain their reservations; active tool workflows do not resume.
 See `docs/POC_FINDINGS.md` for the implemented boundary and adversarial verdict.
 
 ## 1. Executive Overview
@@ -287,29 +292,46 @@ Do not claim:
    exact decimal-string budget.
 2. Governor returns the job ID, pinned pricing identity, protected final
    reserve, and currently available work budget.
-3. The agent sends each Responses request through
+3. Optionally call `POST /v1/jobs/:jobId/quote` with the response fields except
+   `request_id`. It counts the canonical context and runs admission on a copied
+   ledger. It generates no output, reserves no funds, and records no attempt.
+   The editor displays this preview before every prompt or selection submission.
+4. The agent sends each Responses request through
    `POST /v1/jobs/:jobId/responses`, with a job-scoped `request_id` and a
-   `work` or `final` phase.
-4. The runtime counts, reserves, caps, and dispatches against the same job
+   `work` or `final` phase. Optional `max_cost_usd` limits the request reservation;
+   the editor sets it to the approved preview cost. Submission recounts tokens
+   and may reduce the output cap or refuse without generation if it no longer fits.
+5. The runtime counts, reserves, caps, and dispatches against the same job
    ledger; valid terminal usage settles the reservation.
-5. The developer retrieves a stored response with
+6. The developer retrieves a stored response with
    `GET /v1/jobs/:jobId/responses/:requestId` and inspects exact accounting
-   with the CLI or `GET /v1/jobs/:jobId`.
-6. A genuine post-dispatch ambiguity remains fully reserved and moves the job
+   with the CLI or `GET /v1/jobs/:jobId`. `GET /v1/jobs/:jobId/report` returns a
+   single accounting snapshot with rates, usage, request fingerprints, and
+   outcomes. Prompt and generated-output content are excluded.
+7. A genuine post-dispatch ambiguity remains fully reserved and moves the job
    to `reconciliation_required`; no further request is safe until it is
    reconciled.
-7. A completed final response moves to `validation_required`; the application
+8. A completed final response moves to `validation_required`; the application
    explicitly accepts or rejects it before the job closes.
-8. For a no-key demonstration, the extension can run the scripted CI-repair
+9. For a no-key demonstration, the extension can run the scripted CI-repair
    fixture and the CLI can play separately labeled synthetic review scenarios.
 
 ### 8.2 Request identity and retrieval
 
 `request_id` is an idempotency key within one job. The service fingerprints the
-canonical request context, phase, requested output cap, and admission floor.
+canonical request context, phase, requested output cap, admission floor, and any
+per-request cost ceiling.
 Concurrent identical submissions share one provider dispatch; a later
 identical `POST` replays the stored outcome. Reusing the ID for a different
 intent returns `409 REQUEST_ID_CONFLICT`.
+
+For HTTP response submissions, a disconnected client cancels preflight but
+does not cancel generation that has already been dispatched. The provider's
+own timeout and the reserved output cap still apply. Completion persists the
+receipt so a later `GET` can recover it without generating again. Direct
+executor calls and repair workflows retain their explicit cancellation behavior.
+This does not recover a request interrupted by a service crash or a provider
+failure with unknown usage; those reservations remain held.
 
 The response `GET` route returns `200` with the stored execution and current
 job state, without dispatching again. If the original `POST` returned an
@@ -386,7 +408,7 @@ VS Code extension -> local jobs and CI-repair API
 
 **Governed jobs service**
 
-- Creates and inspects in-memory ledgers.
+- Creates and inspects ledgers with durable local job snapshots.
 - Submits, fingerprints, stores, and retrieves governed response outcomes.
 - Requires explicit application validation of a completed final response.
 - Does not run a tool loop or enforce equivalent-tool retry policy.
@@ -412,9 +434,11 @@ VS Code extension -> local jobs and CI-repair API
 - Reserves that amount before dispatch.
 - Retains the full reservation after genuine post-dispatch ambiguity.
 - Settles only when terminal usage is available.
-- Is synchronous in-process memory in the POC; it has no restart durability or
-  cross-process transaction boundary. Its reconciliation method is not exposed
-  by the current HTTP or CLI surface.
+- Uses synchronous in-process transitions. The local API saves the full ledger
+  and request receipt before provider dispatch and after completion, and checks
+  saved accounting against replayed reservations on restart. A storage directory
+  permits one writer; this is not a distributed ledger. Reconciliation is not
+  exposed by the current HTTP or CLI surface.
 
 **Usage and price calculator**
 
@@ -1907,7 +1931,8 @@ POC, not after the extension is polished.
 - [x] Calculate fixed-point cost.
 - [x] Reserve final-answer budget and explicitly validate final output.
 - [x] Bind context/request hashes and pricing identity.
-- [ ] Add durable transactional storage and cross-process recovery.
+- [x] Persist local job accounting and receipts with exclusive storage ownership.
+- [ ] Resume interrupted tool workflows and expose provider reconciliation.
 - [ ] Exercise cancellation and timeout reconciliation with a live provider.
 
 ### Prediction

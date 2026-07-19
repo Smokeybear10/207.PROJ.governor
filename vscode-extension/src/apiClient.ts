@@ -132,9 +132,6 @@ export class GovernorHttpClient {
       }
       return body;
     } catch (error) {
-      if (error instanceof GovernorApiError) {
-        throw error;
-      }
       if (signal?.aborted) {
         throw new GovernorApiError(
           "The Governor request was cancelled.",
@@ -148,6 +145,9 @@ export class GovernorHttpClient {
           0,
           "TIMEOUT"
         );
+      }
+      if (error instanceof GovernorApiError) {
+        throw error;
       }
       throw new GovernorApiError(
         `Could not reach the Governor at ${this.#baseUrl}.`,

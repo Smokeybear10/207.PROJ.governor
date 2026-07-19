@@ -65,6 +65,7 @@ function isHealth(value: unknown): boolean {
 
 export class LocalGovernorServer {
   readonly #serverPath: string;
+  readonly #stateDirectory: string;
   readonly #log: (line: string) => void;
   #child: ManagedChild | undefined;
   #target: ManagedServerTarget | undefined;
@@ -73,9 +74,11 @@ export class LocalGovernorServer {
 
   constructor(options: {
     readonly serverPath: string;
+    readonly stateDirectory: string;
     readonly log: (line: string) => void;
   }) {
     this.#serverPath = options.serverPath;
+    this.#stateDirectory = options.stateDirectory;
     this.#log = options.log;
   }
 
@@ -163,7 +166,7 @@ export class LocalGovernorServer {
     const target = managedServerTarget(options.baseUrl);
     if (!target) {
       await this.stop();
-      return "external";
+      return this.#disposed ? "disabled" : "external";
     }
 
     if (
@@ -172,9 +175,11 @@ export class LocalGovernorServer {
       this.#child
     ) {
       await this.stop();
+      if (this.#disposed) return "disabled";
     }
 
     const initialProbe = await this.#probe(target.baseUrl);
+    if (this.#disposed) return "disabled";
     if (initialProbe === "ready") {
       return this.#child ? "managed" : "external";
     }
@@ -189,6 +194,7 @@ export class LocalGovernorServer {
     if (this.#child) {
       this.#log("managed local server stopped responding; restarting it");
       await this.stop();
+      if (this.#disposed) return "disabled";
     }
 
     if (!existsSync(this.#serverPath)) {
@@ -203,6 +209,7 @@ export class LocalGovernorServer {
     env.ELECTRON_RUN_AS_NODE = "1";
     env.HOST = target.host;
     env.PORT = String(target.port);
+    env.GOVERNOR_STATE_DIR = this.#stateDirectory;
     if (options.apiKey?.trim()) {
       env.OPENAI_API_KEY = options.apiKey.trim();
     } else {
@@ -235,16 +242,19 @@ export class LocalGovernorServer {
 
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
+      if (this.#disposed) return "disabled";
       if (child.exitCode !== null || child.signalCode !== null) {
         break;
       }
       const probe = await this.#probe(target.baseUrl);
+      if (this.#disposed) return "disabled";
       if (probe === "ready") {
         this.#log(`managed local server ready at ${target.baseUrl}`);
         return "managed";
       }
       if (probe === "occupied") {
         await this.stop();
+        if (this.#disposed) return "disabled";
         throw new GovernorApiError(
           `${target.baseUrl} became occupied by a service that is not Governor.`,
           0,
@@ -255,6 +265,7 @@ export class LocalGovernorServer {
     }
 
     await this.stop();
+    if (this.#disposed) return "disabled";
     throw new GovernorApiError(
       `The packaged Governor server did not start at ${target.baseUrl}.`,
       0,
