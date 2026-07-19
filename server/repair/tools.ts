@@ -90,7 +90,7 @@ export const REPAIR_TOOL_DEFINITIONS: readonly JsonObject[] = deepFreeze([
     type: "function",
     name: "list_files",
     description:
-      "List the allowlisted, editable source files in the working tree with their line and byte counts.",
+      "List approved source files and read-only context/tests with their line and byte counts and edit permissions.",
     strict: true,
     parameters: {
       type: "object",
@@ -103,7 +103,7 @@ export const REPAIR_TOOL_DEFINITIONS: readonly JsonObject[] = deepFreeze([
     type: "function",
     name: "read_file",
     description:
-      "Read an inclusive, one-based line range (at most 200 lines) from an allowlisted source file.",
+      "Read an inclusive, one-based line range (at most 200 lines) from an approved source or read-only context/test file.",
     strict: true,
     parameters: {
       type: "object",
@@ -345,6 +345,7 @@ export function createRepairToolbox(
     args: unknown,
     signal?: AbortSignal
   ): Promise<string> {
+    signal?.throwIfAborted();
     switch (name as RepairToolName) {
       case "list_files":
         parseArguments(emptyArgumentsSchema, args);

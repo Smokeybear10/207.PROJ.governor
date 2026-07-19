@@ -19,6 +19,32 @@ afterEach(async () => {
 });
 
 describe("governed CI-repair workflow", () => {
+  it("does not apply a returned patch when cancelled before tool execution", async () => {
+    const provider = new ScriptedResponsesProvider([brokenSumRepairScripts()[1]!]);
+    const fixture = getRepairFixture("broken-sum");
+    const sandbox = await createRepairSandbox(fixture);
+    activeSandbox = sandbox;
+    const original = sandbox.readFile("src/calculator.mjs");
+    const controller = new AbortController();
+
+    await expect(
+      runGovernedRepair({
+        service: new GovernedJobService({ provider }),
+        sandbox,
+        fixture,
+        budgetUsd: "1.00",
+        signal: controller.signal,
+        onTrace(event) {
+          if (event.kind === "response") controller.abort();
+        }
+      })
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(sandbox.readFile("src/calculator.mjs")).toBe(original);
+    expect(sandbox.editedPaths()).toEqual([]);
+    provider.assertComplete();
+  });
+
   it("repairs the broken-sum fixture under budget governance", async () => {
     const provider = new ScriptedResponsesProvider(brokenSumRepairScripts());
     const service = new GovernedJobService({ provider });

@@ -37,8 +37,11 @@ export type GovernedExecutionInput = {
   context: ResponseContext;
   requestedMaxOutputTokens: number;
   minimumUsefulOutputTokens: number;
+  maximumCostMicroUsd?: number;
   phase: "work" | "final";
   signal?: AbortSignal;
+  continueAfterDispatch?: boolean;
+  beforeDispatch?: () => void;
 };
 
 export type GovernedExecutionResult =
@@ -176,6 +179,7 @@ export async function executeGovernedResponse(
 ): Promise<GovernedExecutionResult> {
   let prepared: ReturnType<typeof prepareResponseContext>;
   try {
+    input.signal?.throwIfAborted();
     prepared = prepareResponseContext(input.context);
   } catch (error) {
     return {
@@ -191,6 +195,7 @@ export async function executeGovernedResponse(
       prepared.context,
       input.signal
     );
+    input.signal?.throwIfAborted();
   } catch (error) {
     return {
       status: "preflight_failed",
@@ -207,6 +212,9 @@ export async function executeGovernedResponse(
       exactInputTokens,
       requestedMaxOutputTokens: input.requestedMaxOutputTokens,
       minimumUsefulOutputTokens: input.minimumUsefulOutputTokens,
+      ...(input.maximumCostMicroUsd === undefined
+        ? {}
+        : { maximumCostMicroUsd: input.maximumCostMicroUsd }),
       phase: input.phase,
       binding: {
         contextSha256: prepared.sha256,
@@ -251,9 +259,16 @@ export async function executeGovernedResponse(
     };
   }
 
+  // A durable caller must record the reservation before any paid request.
+  input.beforeDispatch?.();
+
   let response: TerminalResponse;
   try {
-    response = await input.provider.createResponse(request, input.signal);
+    input.signal?.throwIfAborted();
+    response = await input.provider.createResponse(
+      request,
+      input.continueAfterDispatch ? undefined : input.signal
+    );
   } catch (error) {
     if (isDefinitiveProviderRejection(error)) {
       const evidence = providerErrorEvidence(error);

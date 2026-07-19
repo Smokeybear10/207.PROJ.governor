@@ -32,7 +32,7 @@ import {
   type RepairSandbox
 } from "./types.js";
 
-const MAX_WORK_RESPONSES = 8;
+const MAX_WORK_RESPONSES = 23;
 const JOB_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const BUDGET_TOOL_NAME_SET = new Set<string>(BUDGET_TOOL_NAMES);
 
@@ -53,9 +53,9 @@ const REPAIR_INSTRUCTIONS = [
   "Use at most one supplied function per response.",
   "Workflow: inspect files, read the failing test output with run_tests, form a hypothesis, apply a minimal patch with apply_patch, then run_tests again to verify.",
   "Do not edit test files. Keep patches as small as possible.",
-  "You may consult budget tools (budget_status, estimate_action_cost, check_completion_headroom) to stay within budget.",
   "When run_tests reports passed:true, stop and summarize the fix."
 ].join(" ");
+const BUDGET_INSTRUCTIONS = "You may consult budget tools (budget_status, estimate_action_cost, check_completion_headroom) to stay within budget.";
 
 export type RepairTraceEvent =
   | {
@@ -141,6 +141,8 @@ export type GovernedRepairInput = {
   readonly finalMaxOutputTokens?: number;
   readonly signal?: AbortSignal;
   readonly onTrace?: (event: RepairTraceEvent) => void;
+  readonly onSession?: (jobId: string) => void;
+  readonly budgetStrategy?: "governed" | "hard_cap";
 };
 
 function requireBoundedInteger(
@@ -167,7 +169,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   throw error;
 }
 
-function initialInput(sandbox: RepairSandbox): JsonObject[] {
+function initialInput(sandbox: RepairSandbox, fixture: RepairFixture): JsonObject[] {
   const paths = sandbox.allowlistedPaths.slice().sort();
   return [
     {
@@ -178,6 +180,7 @@ function initialInput(sandbox: RepairSandbox): JsonObject[] {
           text: [
             "A build is failing inside an isolated sandbox working copy.",
             `Editable (allowlisted) files: ${paths.join(", ")}.`,
+            `Read-only context and tests: ${(fixture.readonlyPaths ?? []).join(", ") || "none"}.`,
             "Run the tests to see the failure, localize the bug, apply a minimal patch, and re-run the tests until they pass.",
             "Begin by calling run_tests."
           ].join("\n")
@@ -279,6 +282,9 @@ export async function runGovernedRepair(
     minimum_final_output_tokens: minimumFinalOutputTokens,
     max_responses: maxResponses
   });
+  input.onSession?.(session.jobId);
+  const governed = input.budgetStrategy !== "hard_cap";
+  const instructions = governed ? `${REPAIR_INSTRUCTIONS} ${BUDGET_INSTRUCTIONS}` : REPAIR_INSTRUCTIONS;
 
   const workResponseCeiling = Math.max(
     1,
@@ -319,13 +325,13 @@ export async function runGovernedRepair(
   });
   const toolDefinitions: JsonObject[] = [
     ...repairTools.definitions,
-    ...budgetTools.definitions
+    ...(governed ? budgetTools.definitions : [])
   ];
 
   const retryTracker = new RetryFingerprintTracker(
     LOCAL_MAX_EQUIVALENT_RETRIES
   );
-  const transcript: JsonObject[] = initialInput(input.sandbox);
+  const transcript: JsonObject[] = initialInput(input.sandbox, input.fixture);
   const trace: RepairTraceEvent[] = [];
   const seenCallIds = new Set<string>();
   let toolCalls = 0;
@@ -345,13 +351,14 @@ export async function runGovernedRepair(
       requestId,
       phase: "work",
       input: [...transcript],
-      instructions: REPAIR_INSTRUCTIONS,
+      instructions,
       tools: toolDefinitions,
       maxOutputTokens: workMaxOutputTokens,
-      minimumOutputTokens: workMinimumOutputTokens,
+      minimumOutputTokens: governed ? workMinimumOutputTokens : workMaxOutputTokens,
       signal: input.signal
     });
     emit(responseEvent(++sequence, "work", requestId, result));
+    throwIfAborted(input.signal);
 
     const workStop = classifyWorkStop(result);
     if (workStop !== null) {
@@ -414,7 +421,7 @@ export async function runGovernedRepair(
     const isBudgetTool = BUDGET_TOOL_NAME_SET.has(parsed.call.name);
     let toolOutput: string;
     try {
-      toolOutput = isBudgetTool
+      toolOutput = isBudgetTool && governed
         ? await budgetTools.execute(parsed.call.name, parsed.call.arguments)
         : await repairTools.execute(
             parsed.call.name,
@@ -477,7 +484,7 @@ export async function runGovernedRepair(
     requestId: finalRequestId,
     phase: "final",
     input: [...transcript],
-    instructions: REPAIR_INSTRUCTIONS,
+    instructions,
     maxOutputTokens: finalMaxOutputTokens,
     minimumOutputTokens: minimumFinalOutputTokens,
     signal: input.signal

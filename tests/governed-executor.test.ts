@@ -163,6 +163,96 @@ describe("executeGovernedResponse", () => {
     });
   });
 
+  it.each([
+    { exactInputTokens: 10, expectedMaxOutputTokens: 10 },
+    { exactInputTokens: 20, expectedMaxOutputTokens: 5 }
+  ])("honors the same approved ceiling after preflight counts $exactInputTokens input tokens", async ({
+    exactInputTokens,
+    expectedMaxOutputTokens
+  }) => {
+    const ledger = createLedger();
+    const fake = providerFor(async () => terminalResponse({
+      usage: {
+        inputTokens: exactInputTokens,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 5,
+        totalTokens: exactInputTokens + 5
+      }
+    }));
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: {
+        ...fake.provider,
+        async countInput() { return exactInputTokens; }
+      },
+      requestId: "approved-request",
+      context,
+      requestedMaxOutputTokens: 100,
+      minimumUsefulOutputTokens: 5,
+      maximumCostMicroUsd: 32,
+      phase: "work"
+    });
+
+    expect(result).toMatchObject({
+      status: "settled",
+      reservation: {
+        exactInputTokens,
+        maxOutputTokens: expectedMaxOutputTokens,
+        reservedMicroUsd: 32,
+        protectedFutureReserveMicroUsd: 30
+      }
+    });
+    expect(fake.created[0]?.max_output_tokens).toBe(expectedMaxOutputTokens);
+    expect(fake.counts.create).toBe(1);
+    expect(ledger.getSnapshot().settledMicroUsd).toBeLessThanOrEqual(32);
+  });
+
+  it("never dispatches or saves when the request ceiling cannot cover useful output", async () => {
+    const ledger = createLedger();
+    const before = ledger.getState();
+    const fake = providerFor();
+    const beforeDispatch = vi.fn();
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: fake.provider,
+      requestId: "over-request-limit",
+      context,
+      requestedMaxOutputTokens: 100,
+      minimumUsefulOutputTokens: 5,
+      maximumCostMicroUsd: 20,
+      phase: "work",
+      beforeDispatch
+    });
+
+    expect(result).toMatchObject({
+      status: "denied",
+      admission: { reason: "REQUEST_COST_LIMIT", admissibleMaxOutputTokens: 4 }
+    });
+    expect(fake.counts).toEqual({ preflight: 1, create: 0 });
+    expect(beforeDispatch).not.toHaveBeenCalled();
+    expect(ledger.getState()).toEqual(before);
+  });
+
+  it("rejects an invalid request ceiling before reservation or dispatch", async () => {
+    const ledger = createLedger();
+    const fake = providerFor();
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: fake.provider,
+      requestId: "invalid-request-limit",
+      context,
+      requestedMaxOutputTokens: 100,
+      minimumUsefulOutputTokens: 5,
+      maximumCostMicroUsd: 0,
+      phase: "work"
+    });
+
+    expect(result).toMatchObject({ status: "preflight_failed", reason: "INVALID_ARGUMENT" });
+    expect(fake.counts).toEqual({ preflight: 1, create: 0 });
+    expect(ledger.getState().reservations).toEqual([]);
+  });
+
   it("never dispatches when the exact request cannot preserve the final reserve", async () => {
     const ledger = createLedger(40);
     const fake = providerFor();
@@ -213,6 +303,100 @@ describe("executeGovernedResponse", () => {
       reason: "Error"
     });
     expect(result.snapshot.activeReservation).toBeNull();
+  });
+
+  it("does not preflight or reserve an already cancelled request", async () => {
+    const ledger = createLedger();
+    const fake = providerFor();
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: fake.provider,
+      requestId: "cancelled-before-preflight",
+      context,
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work",
+      signal: controller.signal
+    });
+
+    expect(result).toMatchObject({
+      status: "preflight_failed",
+      reason: "AbortError",
+      snapshot: {
+        activeReservation: null,
+        outstandingReservedMicroUsd: 0,
+        responsesStarted: 0
+      }
+    });
+    expect(fake.counts).toEqual({ preflight: 0, create: 0 });
+    expect(ledger.getReservation("cancelled-before-preflight")).toBeUndefined();
+  });
+
+  it("does not dispatch or retain budget when cancelled as preflight completes", async () => {
+    const ledger = createLedger();
+    const controller = new AbortController();
+    const createResponse = vi.fn(async () => terminalResponse());
+    const beforeDispatch = vi.fn();
+
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: {
+        async countInput() {
+          controller.abort();
+          return 10;
+        },
+        createResponse
+      },
+      requestId: "cancelled-after-preflight",
+      context,
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work",
+      signal: controller.signal,
+      beforeDispatch
+    });
+
+    expect(result).toMatchObject({
+      status: "preflight_failed",
+      reason: "AbortError",
+      snapshot: {
+        activeReservation: null,
+        outstandingReservedMicroUsd: 0,
+        responsesStarted: 0
+      }
+    });
+    expect(createResponse).not.toHaveBeenCalled();
+    expect(beforeDispatch).not.toHaveBeenCalled();
+    expect(ledger.getReservation("cancelled-after-preflight")).toBeUndefined();
+  });
+
+  it("retains budget when cancellation occurs after the paid request starts", async () => {
+    const ledger = createLedger();
+    const controller = new AbortController();
+    const fake = providerFor(async () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+
+    const result = await executeGovernedResponse({
+      ledger,
+      provider: fake.provider,
+      requestId: "cancelled-after-dispatch",
+      context,
+      requestedMaxOutputTokens: 20,
+      minimumUsefulOutputTokens: 1,
+      phase: "work",
+      signal: controller.signal
+    });
+
+    expect(fake.counts).toEqual({ preflight: 1, create: 1 });
+    expect(result.status).toBe("unresolved");
+    expect(result.snapshot.responsesStarted).toBe(1);
+    expect(result.snapshot.outstandingReservedMicroUsd).toBeGreaterThan(0);
+    expect(ledger.getReservation("cancelled-after-dispatch")?.status).toBe("ambiguous");
   });
 
   it("rejects previous_response_id before provider preflight", async () => {
@@ -655,5 +839,23 @@ describe("executeGovernedResponse", () => {
 
     expect(result.status).toBe("preflight_failed");
     expect(fake.counts).toEqual({ preflight: 0, create: 0 });
+  });
+
+  it("rechecks cancellation after persisting dispatch intent before calling the provider", async () => {
+    const fake = providerFor();
+    const controller = new AbortController();
+    const result = await executeGovernedResponse({
+      ledger: createLedger(), provider: fake.provider,
+      requestId: "cancel-at-dispatch", context,
+      requestedMaxOutputTokens: 20, minimumUsefulOutputTokens: 1, phase: "work",
+      signal: controller.signal, continueAfterDispatch: true,
+      beforeDispatch: () => controller.abort()
+    });
+
+    expect(fake.counts).toEqual({ preflight: 1, create: 0 });
+    expect(result).toMatchObject({ status: "unresolved",
+      reservation: { status: "ambiguous", reservedMicroUsd: 52 },
+      snapshot: { settledMicroUsd: 0, outstandingReservedMicroUsd: 52 }
+    });
   });
 });

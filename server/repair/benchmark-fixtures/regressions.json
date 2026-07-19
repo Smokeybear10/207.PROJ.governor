@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "label": "authored-regressions-v1",
+  "provenance": "Eight authored regression examples. Smoke providers receive known patches. These are integration checks, not held-out real-world performance evidence.",
+  "tasks": [
+    {
+      "id": "interval-overlap",
+      "description": "Keep the longest end when merging nested intervals.",
+      "files": [
+        {
+          "path": "src/main.mjs",
+          "content": "export function mergeIntervals(intervals) {\n  const result = [];\n  for (const [start, end] of [...intervals].sort((a, b) => a[0] - b[0])) {\n    const last = result.at(-1);\n    if (last && start <= last[1]) last[1] = end;\n    else result.push([start, end]);\n  }\n  return result;\n}\n"
+        },
+        {
+          "path": "test/main.test.mjs",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { mergeIntervals } from '../src/main.mjs';\ntest('nested, touching, disjoint and unsorted intervals', () => {\n  assert.deepEqual(mergeIntervals([[1, 10], [2, 4], [8, 12], [20, 22]]), [[1, 12], [20, 22]]);\n  assert.deepEqual(mergeIntervals([[2, 3], [1, 2]]), [[1, 3]]);\n  assert.deepEqual(mergeIntervals([]), []);\n});\n"
+        }
+      ],
+      "editablePaths": [
+        "src/main.mjs"
+      ],
+      "testPaths": [
+        "test/main.test.mjs"
+      ],
+      "smokeEdits": [
+        {
+          "path": "src/main.mjs",
+          "oldText": "last[1] = end;",
+          "newText": "last[1] = Math.max(last[1], end);"
+        }
+      ]
+    },
+    {
+      "id": "binary-first",
+      "description": "Return the first index when binary search encounters duplicate values.",
+      "files": [
+        {
+          "path": "src/main.mjs",
+          "content": "export function lowerBound(values, target) {\n  let low = 0;\n  let high = values.length;\n  while (low < high) {\n    const middle = Math.floor((low + high) / 2);\n    if (values[middle] <= target) low = middle + 1;\n    else high = middle;\n  }\n  return low;\n}\n"
+        },
+        {
+          "path": "test/main.test.mjs",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { lowerBound } from '../src/main.mjs';\ntest('insertion point precedes equal values', () => {\n  assert.equal(lowerBound([1, 3, 3, 3, 8], 3), 1);\n  assert.equal(lowerBound([1, 3, 8], 7), 2);\n  assert.equal(lowerBound([], 1), 0);\n  assert.equal(lowerBound([1], 9), 1);\n});\n"
+        }
+      ],
+      "editablePaths": [
+        "src/main.mjs"
+      ],
+      "testPaths": [
+        "test/main.test.mjs"
+      ],
+      "smokeEdits": [
+        {
+          "path": "src/main.mjs",
+          "oldText": "values[middle] <= target",
+          "newText": "values[middle] < target"
+        }
+      ]
+    },
+    {
+      "id": "moving-average",
+      "description": "Use the actual sample count while the rolling window is filling.",
+      "files": [
+        {
+          "path": "src/main.mjs",
+          "content": "export function movingAverage(values, width) {\n  if (!Number.isInteger(width) || width < 1) throw new RangeError('width');\n  let total = 0;\n  return values.map((value, index) => {\n    total += value;\n    if (index >= width) total -= values[index - width];\n    return total / width;\n  });\n}\n"
+        },
+        {
+          "path": "test/main.test.mjs",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { movingAverage } from '../src/main.mjs';\ntest('partial windows and sliding windows', () => {\n  assert.deepEqual(movingAverage([2, 4, 9, 5], 3), [2, 3, 5, 6]);\n  assert.deepEqual(movingAverage([7], 5), [7]);\n  assert.deepEqual(movingAverage([], 2), []);\n  assert.throws(() => movingAverage([1], 0), RangeError);\n});\n"
+        }
+      ],
+      "editablePaths": [
+        "src/main.mjs"
+      ],
+      "testPaths": [
+        "test/main.test.mjs"
+      ],
+      "smokeEdits": [
+        {
+          "path": "src/main.mjs",
+          "oldText": "return total / width;",
+          "newText": "return total / Math.min(width, index + 1);"
+        }
+      ]
+    },
+    {
+      "id": "memoize-falsy",
+      "description": "Cache falsy results without calling the wrapped function again.",
+      "files": [
+        {
+          "path": "src/main.mjs",
+          "content": "export function memoize(fn) {\n  const cache = new Map();\n  return (key) => {\n    if (cache.get(key)) return cache.get(key);\n    const value = fn(key);\n    cache.set(key, value);\n    return value;\n  };\n}\n"
+        },
+        {
+          "path": "test/main.test.mjs",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { memoize } from '../src/main.mjs';\ntest('zero, false and undefined are cached', () => {\n  let calls = 0;\n  const fn = memoize((key) => { calls++; return key; });\n  for (const value of [0, false, undefined, '', 7]) {\n    assert.equal(fn(value), value);\n    assert.equal(fn(value), value);\n  }\n  assert.equal(calls, 5);\n});\n"
+        }
+      ],
+      "editablePaths": [
+        "src/main.mjs"
+      ],
+      "testPaths": [
+        "test/main.test.mjs"
+      ],
+      "smokeEdits": [
+        {
+          "path": "src/main.mjs",
+          "oldText": "if (cache.get(key))",
+          "newText": "if (cache.has(key))"
+        }
+      ]
+    },
+    {
+      "id": "csv-escaped-quote",
+      "description": "Parse doubled quotes within a quoted CSV field.",
+      "files": [
+        {
+          "path": "src/main.mjs",
+          "content": "export function parseRow(row) {\n  const fields = [];\n  let field = '';\n  let quoted = false;\n  for (let i = 0; i < row.length; i++) {\n    const char = row[i];\n    if (char === '\"') quoted = !quoted;\n    else if (char === ',' && !quoted) { fields.push(field); field = ''; }\n    else field += char;\n  }\n  fields.push(field);\n  return fields;\n}\n"
+        },
+        {
+          "path": "test/main.test.mjs",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { parseRow } from '../src/main.mjs';\ntest('quoted commas, escaped quotes and empty fields', () => {\n  assert.deepEqual(parseRow('a,\"b,b\",c'), ['a', 'b,b', 'c']);\n  assert.deepEqual(parseRow('\"he said \"\"yes\"\"\",ok,'), ['he said \"yes\"', 'ok', '']);\n  assert.deepEqual(parseRow(''), ['']);\n});\n"
+        }
+      ],
+      "editablePaths": [
+        "src/main.mjs"
+      ],
+      "testPaths": [
+        "test/main.test.mjs"
+      ],
+      "smokeEdits": [
+        {
+          "path": "src/main.mjs",
+          "oldText": "if (char === '\"') quoted = !quoted;",
+          "newText": "if (char === '\"' && quoted && row[i + 1] === '\"') { field += '\"'; i++; }\n    else if (char === '\"') quoted = !quoted;"
+        }
+      ]
+    },
+    {
+      "id": "percentile-rank",
+      "description": "Use the nearest-rank definition at percentile boundaries.",
+      "files": [
+        {
+          "path": "src/main.mjs",
+          "content": "export function percentile(values, p) {\n  if (!values.length || p < 0 || p > 1) throw new RangeError('percentile');\n  const sorted = [...values].sort((a, b) => a - b);\n  return sorted[Math.floor(p * sorted.length)];\n}\n"
+        },
+        {
+          "path": "test/main.test.mjs",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { percentile } from '../src/main.mjs';\ntest('nearest rank includes both endpoints', () => {\n  assert.equal(percentile([4, 1, 3, 2], 0.5), 2);\n  assert.equal(percentile([4, 1, 3, 2], 1), 4);\n  assert.equal(percentile([9, 5], 0), 5);\n  assert.equal(percentile([3], 0.99), 3);\n  assert.throws(() => percentile([], 0.5), RangeError);\n});\n"
+        }
+      ],
+      "editablePaths": [
+        "src/main.mjs"
+      ],
+      "testPaths": [
+        "test/main.test.mjs"
+      ],
+      "smokeEdits": [
+        {
+          "path": "src/main.mjs",
+          "oldText": "Math.floor(p * sorted.length)",
+          "newText": "Math.max(0, Math.ceil(p * sorted.length) - 1)"
+        }
+      ]
+    },
+    {
+      "id": "group-prototype",
+      "description": "Group arbitrary keys without collisions with object prototype properties.",
+      "files": [
+        {
+          "path": "src/main.mjs",
+          "content": "export function groupBy(items, keyOf) {\n  const groups = {};\n  for (const item of items) {\n    const key = keyOf(item);\n    if (!groups[key]) groups[key] = [];\n    groups[key].push(item);\n  }\n  return groups;\n}\n"
+        },
+        {
+          "path": "test/main.test.mjs",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { groupBy } from '../src/main.mjs';\ntest('prototype names are ordinary grouping keys', () => {\n  const rows = [{k:'__proto__', n:1}, {k:'constructor', n:2}, {k:'__proto__', n:3}, {k:'a', n:4}];\n  const groups = groupBy(rows, (row) => row.k);\n  assert.deepEqual(groups.__proto__, [rows[0], rows[2]]);\n  assert.deepEqual(groups.constructor, [rows[1]]);\n  assert.deepEqual(groups.a, [rows[3]]);\n  assert.equal(Object.keys(groups).length, 3);\n});\n"
+        }
+      ],
+      "editablePaths": [
+        "src/main.mjs"
+      ],
+      "testPaths": [
+        "test/main.test.mjs"
+      ],
+      "smokeEdits": [
+        {
+          "path": "src/main.mjs",
+          "oldText": "const groups = {};",
+          "newText": "const groups = Object.create(null);"
+        }
+      ]
+    },
+    {
+      "id": "lru-refresh",
+      "description": "Refresh recency on cache reads before evicting an entry.",
+      "files": [
+        {
+          "path": "src/main.mjs",
+          "content": "export function createCache(capacity) {\n  const entries = new Map();\n  return {\n    get(key) {\n      return entries.get(key);\n    },\n    set(key, value) {\n      entries.delete(key);\n      entries.set(key, value);\n      if (entries.size > capacity) entries.delete(entries.keys().next().value);\n    }\n  };\n}\n"
+        },
+        {
+          "path": "test/main.test.mjs",
+          "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { createCache } from '../src/main.mjs';\ntest('recently read entries survive eviction', () => {\n  const cache = createCache(2);\n  cache.set('a', 1); cache.set('b', 2);\n  assert.equal(cache.get('a'), 1);\n  cache.set('c', 3);\n  assert.equal(cache.get('b'), undefined);\n  assert.equal(cache.get('a'), 1);\n  assert.equal(cache.get('c'), 3);\n  assert.equal(cache.get('missing'), undefined);\n});\n"
+        }
+      ],
+      "editablePaths": [
+        "src/main.mjs"
+      ],
+      "testPaths": [
+        "test/main.test.mjs"
+      ],
+      "smokeEdits": [
+        {
+          "path": "src/main.mjs",
+          "oldText": "return entries.get(key);",
+          "newText": "if (!entries.has(key)) return undefined;\n      const value = entries.get(key);\n      entries.delete(key);\n      entries.set(key, value);\n      return value;"
+        }
+      ]
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
 import {
   calculateAdmissibleOutputCap,
   calculateUsageCost,
@@ -33,6 +35,7 @@ export interface ExactInputAdmission {
   readonly exactInputTokens: number;
   readonly requestedMaxOutputTokens: number;
   readonly minimumUsefulOutputTokens: number;
+  readonly maximumCostMicroUsd?: number;
   readonly phase: "work" | "final";
   readonly binding: RequestBinding;
 }
@@ -143,6 +146,7 @@ export type AdmissionDenialReason =
   | "JOB_CLOSED"
   | "FINAL_INPUT_LIMIT_EXCEEDED"
   | "OUTPUT_BELOW_MINIMUM"
+  | "REQUEST_COST_LIMIT"
   | "RESPONSE_LIMIT_REACHED"
   | "UNRESOLVED_REQUEST";
 
@@ -171,6 +175,118 @@ export interface LedgerSnapshot {
   readonly completionAccepted: boolean | null;
   readonly activeReservation: RequestReservation | null;
 }
+
+export type LedgerState = {
+  readonly version: 1;
+  readonly policy: GovernorPolicy;
+  readonly rateCard: RateCard;
+  readonly reservations: readonly RequestReservation[];
+  readonly activeRequestId: string | null;
+  readonly settledMicroUsd: number;
+  readonly responsesStarted: number;
+  readonly closed: boolean;
+  readonly pendingFinalValidationRequestId: string | null;
+  readonly completionAccepted: boolean | null;
+};
+
+const savedInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const savedString = z.string().refine((value) => value.trim().length > 0);
+const savedSha256 = z.string().regex(SHA256_PATTERN);
+const savedUsageFields = {
+  usageSource: z.literal("provider"),
+  inputTokens: savedInteger,
+  cachedInputTokens: savedInteger,
+  cacheWriteTokens: savedInteger,
+  outputTokens: savedInteger,
+  reasoningOutputTokens: savedInteger,
+  totalTokens: savedInteger.optional()
+};
+const savedPricingIdentity = z.strictObject({
+  provider: savedString,
+  model: savedString,
+  serviceTier: savedString,
+  requestServiceTier: z.literal("default"),
+  processingRegion: savedString,
+  rateCardVersion: savedString
+});
+const ledgerStateSchema: z.ZodType<LedgerState> = z.strictObject({
+  version: z.literal(1),
+  policy: z.strictObject({
+    applicationCeilingMicroUsd: savedInteger.positive(),
+    finalAnswerReserveMicroUsd: savedInteger,
+    finalAnswerInputTokenLimit: savedInteger.positive(),
+    minimumFinalOutputTokens: savedInteger.positive(),
+    maxResponses: savedInteger.positive(),
+    maxEquivalentRetries: savedInteger,
+    rateCardVersion: savedString
+  }),
+  rateCard: z.strictObject({
+    provider: savedString,
+    model: savedString,
+    serviceTier: savedString,
+    processingRegion: savedString,
+    version: savedString,
+    currency: z.literal("USD"),
+    effectiveAt: savedString,
+    source: savedString,
+    rates: z.strictObject({
+      uncachedInputMicroUsdPerMillionTokens: savedInteger.positive(),
+      cachedInputMicroUsdPerMillionTokens: savedInteger,
+      cacheWriteInputMicroUsdPerMillionTokens: savedInteger,
+      outputMicroUsdPerMillionTokens: savedInteger.positive()
+    })
+  }),
+  reservations: z.array(z.strictObject({
+    requestId: savedString,
+    exactInputTokens: savedInteger,
+    maxOutputTokens: savedInteger.positive(),
+    reservedMicroUsd: savedInteger,
+    protectedFutureReserveMicroUsd: savedInteger,
+    contextSha256: savedSha256,
+    requestSha256: savedSha256.optional(),
+    pricingIdentity: savedPricingIdentity,
+    rateCardVersion: savedString,
+    phase: z.enum(["work", "final"]),
+    status: z.enum(["reserved", "in_flight", "ambiguous", "settled", "released"]),
+    settledMicroUsd: savedInteger.optional(),
+    usage: z.strictObject({
+      ...savedUsageFields,
+      uncachedInputTokens: savedInteger
+    }).optional(),
+    providerResponse: z.strictObject({
+      id: savedString,
+      model: savedString,
+      serviceTier: z.literal("default"),
+      status: z.enum(["completed", "failed", "incomplete", "cancelled"])
+    }).optional(),
+    providerRejection: z.strictObject({
+      httpStatus: savedInteger,
+      requestId: savedString.optional()
+    }).optional(),
+    applicationAccepted: z.boolean().optional(),
+    ambiguity: z.strictObject({
+      reason: z.enum([
+        "timeout", "cancellation", "transport_error", "missing_usage",
+        "usage_mismatch", "nonterminal_response", "provider_protocol_error"
+      ]),
+      observedUsage: z.strictObject(savedUsageFields)
+        .partial()
+        .extend({ usageSource: z.literal("provider") })
+        .optional()
+    }).optional(),
+    terminalReason: z.enum([
+      "provider_completed", "provider_failed", "provider_incomplete",
+      "provider_cancelled", "provider_rejected", "cancelled_with_usage",
+      "cancelled_before_dispatch", "released_before_dispatch"
+    ]).optional()
+  })),
+  activeRequestId: savedString.nullable(),
+  settledMicroUsd: savedInteger,
+  responsesStarted: savedInteger,
+  closed: z.boolean(),
+  pendingFinalValidationRequestId: savedString.nullable(),
+  completionAccepted: z.boolean().nullable()
+});
 
 export type ProviderReconciliation = {
   readonly kind: "usage";
@@ -255,38 +371,39 @@ function copyUsageObservation(
     "reasoningOutputTokens",
     "totalTokens"
   ] as const;
+  const values: Partial<Record<(typeof numericFields)[number], number>> = {};
   for (const field of numericFields) {
     const value = observation[field];
     if (value !== undefined) {
-      requireNonNegativeSafeInteger(value, field, "INVALID_USAGE");
+      values[field] = requireNonNegativeSafeInteger(value, field, "INVALID_USAGE");
     }
   }
 
   if (
-    observation.inputTokens !== undefined &&
-    observation.cachedInputTokens !== undefined &&
-    observation.cacheWriteTokens !== undefined
+    values.inputTokens !== undefined &&
+    values.cachedInputTokens !== undefined &&
+    values.cacheWriteTokens !== undefined
   ) {
     assertGovernor(
-      BigInt(observation.cachedInputTokens) +
-        BigInt(observation.cacheWriteTokens) <=
-        BigInt(observation.inputTokens),
+      BigInt(values.cachedInputTokens) +
+        BigInt(values.cacheWriteTokens) <=
+        BigInt(values.inputTokens),
       "INVALID_USAGE",
       "Observed cached and cache-write partitions cannot exceed inputTokens."
     );
   }
   if (
-    observation.outputTokens !== undefined &&
-    observation.reasoningOutputTokens !== undefined
+    values.outputTokens !== undefined &&
+    values.reasoningOutputTokens !== undefined
   ) {
     assertGovernor(
-      observation.reasoningOutputTokens <= observation.outputTokens,
+      values.reasoningOutputTokens <= values.outputTokens,
       "INVALID_USAGE",
       "Observed reasoning output cannot exceed outputTokens."
     );
   }
 
-  return Object.freeze({ ...observation });
+  return Object.freeze({ usageSource: "provider" as const, ...values });
 }
 
 function snapshotReservation(
@@ -401,6 +518,139 @@ export class ReservationLedger {
     );
   }
 
+  static restore(value: unknown, rateCard: RateCard): ReservationLedger {
+    const parsed = ledgerStateSchema.safeParse(value);
+    assertGovernor(
+      parsed.success,
+      "INVALID_ARGUMENT",
+      "The saved ledger state is malformed or has an unsupported version."
+    );
+    const state = parsed.data;
+    assertGovernor(
+      isDeepStrictEqual(state.rateCard, createRateCard(rateCard)),
+      "RATE_CARD_MISMATCH",
+      "The saved ledger rate card does not match the configured rate card."
+    );
+    const ledger = new ReservationLedger(state.policy, rateCard);
+    for (const reservation of state.reservations) {
+      const admission = ledger.reserve({
+        requestId: reservation.requestId,
+        exactInputTokens: reservation.exactInputTokens,
+        requestedMaxOutputTokens: reservation.maxOutputTokens,
+        minimumUsefulOutputTokens: 1,
+        phase: reservation.phase,
+        binding: {
+          contextSha256: reservation.contextSha256,
+          model: reservation.pricingIdentity.model,
+          serviceTier: reservation.pricingIdentity.requestServiceTier,
+          processingRegion: reservation.pricingIdentity.processingRegion
+        }
+      });
+      assertGovernor(
+        admission.admitted,
+        "INVALID_ARGUMENT",
+        "The saved reservation history cannot be admitted."
+      );
+      if (reservation.requestSha256 !== undefined) {
+        ledger.dispatch(reservation.requestId, {
+          requestSha256: reservation.requestSha256
+        });
+      }
+      switch (reservation.status) {
+        case "reserved":
+        case "in_flight":
+          break;
+        case "released":
+          if (reservation.providerRejection !== undefined) {
+            ledger.releaseProviderRejection(
+              reservation.requestId,
+              reservation.providerRejection
+            );
+          } else if (reservation.terminalReason === "cancelled_before_dispatch") {
+            ledger.cancel(reservation.requestId);
+          } else {
+            ledger.release(reservation.requestId);
+          }
+          break;
+        case "ambiguous": {
+          const ambiguity = reservation.ambiguity;
+          assertGovernor(
+            ambiguity !== undefined,
+            "INVALID_ARGUMENT",
+            "Saved ambiguity evidence is missing."
+          );
+          if (ambiguity.reason === "cancellation") {
+            ledger.cancel(reservation.requestId, {
+              kind: "unknown",
+              observedUsage: ambiguity.observedUsage
+            });
+          } else {
+            ledger.markAmbiguous(
+              reservation.requestId,
+              ambiguity.reason,
+              ambiguity.observedUsage
+            );
+          }
+          break;
+        }
+        case "settled": {
+          assertGovernor(
+            reservation.usage !== undefined &&
+              reservation.providerResponse !== undefined,
+            "INVALID_ARGUMENT",
+            "Saved settlement evidence is missing."
+          );
+          if (reservation.terminalReason === "cancelled_with_usage") {
+            ledger.cancel(reservation.requestId, {
+              kind: "usage",
+              usage: reservation.usage,
+              evidence: reservation.providerResponse
+            });
+          } else {
+            ledger.settle(
+              reservation.requestId,
+              reservation.usage,
+              reservation.providerResponse
+            );
+          }
+          if (reservation.applicationAccepted !== undefined) {
+            ledger.finalizeFinalResponse(
+              reservation.requestId,
+              reservation.applicationAccepted
+            );
+          }
+          break;
+        }
+      }
+    }
+    if (state.closed && !ledger.#closed) {
+      ledger.closeStoppedJob();
+    }
+    assertGovernor(
+      isDeepStrictEqual(ledger.getState(), state),
+      "INVALID_ARGUMENT",
+      "The saved ledger accounting does not match its reservation history."
+    );
+    return ledger;
+  }
+
+  getState(): LedgerState {
+    return Object.freeze({
+      version: 1 as const,
+      policy: this.#policy,
+      rateCard: this.#rateCard,
+      reservations: Object.freeze(
+        [...this.#reservations.values()].map(snapshotReservation)
+      ),
+      activeRequestId: this.#activeRequestId,
+      settledMicroUsd: this.#settledMicroUsd,
+      responsesStarted: this.#responsesStarted,
+      closed: this.#closed,
+      pendingFinalValidationRequestId: this.#pendingFinalValidationRequestId,
+      completionAccepted: this.#completionAccepted
+    });
+  }
+
   getPricingIdentity(): RequestPricingIdentity {
     return this.#pricingIdentity;
   }
@@ -419,6 +669,12 @@ export class ReservationLedger {
       input.minimumUsefulOutputTokens,
       "minimumUsefulOutputTokens"
     );
+    if (input.maximumCostMicroUsd !== undefined) {
+      requirePositiveSafeInteger(
+        input.maximumCostMicroUsd,
+        "maximumCostMicroUsd"
+      );
+    }
     assertGovernor(
       input.minimumUsefulOutputTokens <=
         input.requestedMaxOutputTokens,
@@ -432,7 +688,11 @@ export class ReservationLedger {
     );
     this.#assertRequestBinding(input.binding);
 
-    const availableMicroUsd = this.#availableFor(input.phase);
+    const phaseAvailableMicroUsd = this.#availableFor(input.phase);
+    const availableMicroUsd = Math.min(
+      phaseAvailableMicroUsd,
+      input.maximumCostMicroUsd ?? phaseAvailableMicroUsd
+    );
     if (this.#closed) {
       return denied("JOB_CLOSED", availableMicroUsd);
     }
@@ -471,13 +731,28 @@ export class ReservationLedger {
       input.requestedMaxOutputTokens
     );
     if (admissibleMaxOutputTokens < effectiveMinimumOutputTokens) {
+      if (
+        availableMicroUsd < phaseAvailableMicroUsd &&
+        calculateAdmissibleOutputCap(
+          this.#rateCard,
+          input.exactInputTokens,
+          phaseAvailableMicroUsd,
+          input.requestedMaxOutputTokens
+        ) >= effectiveMinimumOutputTokens
+      ) {
+        return denied(
+          "REQUEST_COST_LIMIT",
+          availableMicroUsd,
+          admissibleMaxOutputTokens
+        );
+      }
       const inputCost = calculateWorstCaseRequestCost(
         this.#rateCard,
         input.exactInputTokens,
         0
       ).inputMicroUsd;
       return denied(
-        inputCost > availableMicroUsd
+        inputCost > phaseAvailableMicroUsd
           ? "INPUT_EXCEEDS_AVAILABLE_BUDGET"
           : "OUTPUT_BELOW_MINIMUM",
         availableMicroUsd,
@@ -592,13 +867,14 @@ export class ReservationLedger {
       "Unknown ambiguity reason."
     );
     const reservation = this.#requireActive(requestId, ["in_flight"]);
-    reservation.status = "ambiguous";
-    reservation.ambiguity = Object.freeze({
+    const ambiguity = Object.freeze({
       reason,
       ...(observedUsage === undefined
         ? {}
         : { observedUsage: copyUsageObservation(observedUsage) })
     });
+    reservation.status = "ambiguous";
+    reservation.ambiguity = ambiguity;
     return snapshotReservation(reservation);
   }
 
@@ -670,10 +946,9 @@ export class ReservationLedger {
       );
     }
 
-    if (reservation.status === "in_flight") {
-      reservation.status = "ambiguous";
-      reservation.ambiguity = Object.freeze({
-        reason: "cancellation" as const,
+    if (reservation.status === "in_flight" || resolution.observedUsage !== undefined) {
+      const ambiguity = Object.freeze({
+        reason: reservation.ambiguity?.reason ?? "cancellation",
         ...(resolution.observedUsage === undefined
           ? {}
           : {
@@ -682,13 +957,8 @@ export class ReservationLedger {
               )
             })
       });
-    } else if (resolution.observedUsage !== undefined) {
-      reservation.ambiguity = Object.freeze({
-        reason: reservation.ambiguity?.reason ?? "cancellation",
-        observedUsage: copyUsageObservation(
-          resolution.observedUsage
-        )
-      });
+      reservation.status = "ambiguous";
+      reservation.ambiguity = ambiguity;
     }
     return snapshotReservation(reservation);
   }

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { ApiError } from "../errors.js";
+import type { JobStore } from "./store.js";
 import {
   GPT_5_4_MINI_STANDARD_RATE_CARD,
   GovernorError,
@@ -51,6 +53,15 @@ const createJobSchema = z.strictObject({
   max_responses: z.number().int().min(1).max(32).optional()
 });
 
+const listJobsSchema = z.strictObject({
+  limit: z.string()
+    .regex(/^[1-9]\d{0,2}$/)
+    .transform(Number)
+    .pipe(z.number().int().min(1).max(100))
+    .optional(),
+  after: z.string().regex(JOB_ID_PATTERN).optional()
+});
+
 const responseSchema = z.strictObject({
   request_id: z.string().regex(REQUEST_ID_PATTERN),
   phase: z.enum(["work", "final"]),
@@ -64,8 +75,13 @@ const responseSchema = z.strictObject({
     .max(32)
     .optional(),
   max_output_tokens: z.number().int().min(1).max(16_384).optional(),
-  minimum_output_tokens: z.number().int().min(1).max(16_384).optional()
+  minimum_output_tokens: z.number().int().min(1).max(16_384).optional(),
+  max_cost_usd: exactUsdSchema.refine((value) => /[1-9]/.test(value), {
+    message: "must be a positive decimal USD amount"
+  }).optional()
 });
+
+const quoteSchema = responseSchema.omit({ request_id: true });
 
 const finalizeSchema = z.strictObject({
   request_id: z.string().regex(REQUEST_ID_PATTERN),
@@ -74,6 +90,7 @@ const finalizeSchema = z.strictObject({
 
 type CreateJobRequest = z.infer<typeof createJobSchema>;
 type CreateResponseRequest = z.infer<typeof responseSchema>;
+type QuoteRequest = z.infer<typeof quoteSchema>;
 type FinalizeRequest = z.infer<typeof finalizeSchema>;
 
 type AttemptOutcome =
@@ -111,10 +128,42 @@ type JobRecord = {
   nextAttemptSequence: number;
 };
 
+const outcomeSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("response"),
+    statusCode: z.union([z.literal(200), z.literal(202)]),
+    execution: z.record(z.string(), z.unknown())
+  }),
+  z.strictObject({
+    kind: z.literal("error"),
+    statusCode: z.union([z.literal(409), z.literal(502)]),
+    code: z.enum(["GOVERNOR_DENIED", "PREFLIGHT_FAILED", "PROVIDER_REJECTED"]),
+    message: z.string(),
+    execution: z.record(z.string(), z.unknown())
+  })
+]);
+
+const storedJobSchema = z.strictObject({
+  version: z.literal(1),
+  id: z.string().regex(JOB_ID_PATTERN),
+  createdAt: z.iso.datetime(),
+  ledger: z.unknown(),
+  nextAttemptSequence: z.number().int().min(1).max(MAX_JOB_RESPONSE_ATTEMPTS + 1),
+  attempts: z.array(z.strictObject({
+    sequence: z.number().int().positive(),
+    requestId: z.string().regex(REQUEST_ID_PATTERN),
+    phase: z.enum(["work", "final"]),
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    startedAt: z.iso.datetime(),
+    outcome: outcomeSchema.optional()
+  })).max(MAX_JOB_RESPONSE_ATTEMPTS)
+});
+
 export type GovernedJobServiceOptions = {
   readonly provider?: ResponsesProvider;
   readonly idFactory?: () => string;
   readonly now?: () => Date;
+  readonly store?: JobStore;
 };
 
 export type GovernedResponseServiceResult = {
@@ -228,8 +277,64 @@ function attemptSummary(
   };
 }
 
+function validateSavedOutcome(ledger: ReservationLedger, attempt: ResponseAttempt): void {
+  const outcome = attempt.outcome;
+  if (outcome === undefined) return;
+  const reservation = ledger.getReservation(attempt.requestId);
+  const execution = outcome.execution;
+  const fail = (): never => {
+    throw new Error(`Saved response ${attempt.requestId} does not match its ledger.`);
+  };
+  if (reservation !== undefined && !isDeepStrictEqual(execution.reservation, reservationView(reservation))) {
+    if (execution.status !== "preflight_failed") fail();
+  }
+  switch (execution.status) {
+    case "settled":
+    case "provider_stopped": {
+      if (outcome.kind !== "response" || outcome.statusCode !== 200 || reservation?.status !== "settled") fail();
+      const response = execution.response;
+      if (typeof response !== "object" || response === null || Array.isArray(response)) fail();
+      const saved = response as Record<string, unknown>;
+      const evidence = reservation!.providerResponse!;
+      const usage = reservation!.usage!;
+      if (
+        saved.id !== evidence.id || saved.model !== evidence.model ||
+        saved.status !== evidence.status || saved.service_tier !== evidence.serviceTier ||
+        !Array.isArray(saved.output) ||
+        (execution.status === "settled") !== (evidence.status === "completed") ||
+        !isDeepStrictEqual(saved.usage, {
+          input_tokens: usage.inputTokens,
+          cached_input_tokens: usage.cachedInputTokens,
+          cache_write_input_tokens: usage.cacheWriteTokens,
+          output_tokens: usage.outputTokens,
+          reasoning_output_tokens: usage.reasoningOutputTokens,
+          total_tokens: usage.totalTokens
+        })
+      ) fail();
+      return;
+    }
+    case "unresolved":
+      if (outcome.kind !== "response" || outcome.statusCode !== 202 || reservation?.status !== "ambiguous") fail();
+      return;
+    case "provider_rejected":
+      if (outcome.kind !== "error" || outcome.code !== "PROVIDER_REJECTED" || outcome.statusCode !== 502 ||
+        reservation?.status !== "released" || reservation.providerRejection === undefined) fail();
+      return;
+    case "denied":
+      if (outcome.kind !== "error" || outcome.code !== "GOVERNOR_DENIED" || outcome.statusCode !== 409 || reservation !== undefined) fail();
+      return;
+    case "preflight_failed":
+      if (outcome.kind !== "error" || outcome.code !== "PREFLIGHT_FAILED" || outcome.statusCode !== 502 ||
+        (reservation !== undefined && (reservation.status !== "released" || reservation.requestSha256 !== undefined))) fail();
+      return;
+    default:
+      fail();
+  }
+}
+
 function jobStatus(
-  snapshot: LedgerSnapshot
+  snapshot: LedgerSnapshot,
+  attempts: ReadonlyMap<string, ResponseAttempt>
 ):
   | "open"
   | "response_in_flight"
@@ -246,7 +351,8 @@ function jobStatus(
   if (snapshot.activeReservation?.status === "ambiguous") {
     return "reconciliation_required";
   }
-  if (snapshot.activeReservation !== null) {
+  if (snapshot.activeReservation !== null ||
+    [...attempts.values()].some((attempt) => attempt.outcome === undefined)) {
     return "response_in_flight";
   }
   return "open";
@@ -259,7 +365,7 @@ function jobView(record: JobRecord): Record<string, unknown> {
     id: record.id,
     object: "token_governor.job",
     created_at: record.createdAt,
-    status: jobStatus(snapshot),
+    status: jobStatus(snapshot, record.attempts),
     policy: {
       budget_micro_usd: snapshot.policy.applicationCeilingMicroUsd,
       budget_usd: formatMicroUsd(
@@ -324,9 +430,11 @@ function responseIntentFingerprint(
   context: ResponseContext,
   phase: "work" | "final",
   requestedMaxOutputTokens: number,
-  minimumUsefulOutputTokens: number
+  minimumUsefulOutputTokens: number,
+  maximumCostMicroUsd?: number
 ): {
   readonly context: ResponseContext;
+  readonly contextSha256: string;
   readonly fingerprint: string;
 } {
   let prepared: ReturnType<typeof prepareResponseContext>;
@@ -348,15 +456,50 @@ function responseIntentFingerprint(
         context_sha256: prepared.sha256,
         phase,
         requested_max_output_tokens: requestedMaxOutputTokens,
-        minimum_useful_output_tokens: minimumUsefulOutputTokens
+        minimum_useful_output_tokens: minimumUsefulOutputTokens,
+        ...(maximumCostMicroUsd === undefined ? {} : { maximum_cost_micro_usd: maximumCostMicroUsd })
       }),
       "utf8"
     )
     .digest("hex");
   return {
     context: prepared.context,
+    contextSha256: prepared.sha256,
     fingerprint
   };
+}
+
+function prepareResponseInput(record: JobRecord, input: QuoteRequest) {
+  const pricing = record.ledger.getPricingIdentity();
+  const model = input.model ?? pricing.model;
+  if (model !== pricing.model) {
+    throw new ApiError("MODEL_NOT_PRICED", `This POC has a pinned rate card for ${pricing.model}.`, 400);
+  }
+  const defaultMinimumOutputTokens = input.phase === "final"
+    ? record.ledger.getSnapshot().policy.minimumFinalOutputTokens
+    : DEFAULT_WORK_MINIMUM_OUTPUT_TOKENS;
+  const defaultMaxOutputTokens = input.phase === "final"
+    ? Math.max(DEFAULT_FINAL_MAX_OUTPUT_TOKENS, defaultMinimumOutputTokens)
+    : DEFAULT_WORK_MAX_OUTPUT_TOKENS;
+  const maxOutputTokens = input.max_output_tokens ?? defaultMaxOutputTokens;
+  const minimumOutputTokens = input.minimum_output_tokens ?? defaultMinimumOutputTokens;
+  if (minimumOutputTokens > maxOutputTokens) {
+    throw new ApiError("INVALID_RESPONSE_REQUEST", "minimum_output_tokens cannot exceed max_output_tokens.", 400);
+  }
+  if (input.phase === "final" && (input.tools?.length ?? 0) > 0) {
+    throw new ApiError("FINAL_TOOLS_NOT_ALLOWED", "Final responses cannot declare tools.", 400);
+  }
+  const maximumCostMicroUsd = input.max_cost_usd === undefined
+    ? undefined
+    : parseUsdToMicroUsd(input.max_cost_usd);
+  const intent = responseIntentFingerprint({
+    model,
+    input: input.input,
+    ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
+    ...(input.tools === undefined ? {} : { tools: input.tools as JsonObject[] }),
+    service_tier: "default"
+  }, input.phase, maxOutputTokens, minimumOutputTokens, maximumCostMicroUsd);
+  return { ...intent, maxOutputTokens, minimumOutputTokens, maximumCostMicroUsd };
 }
 
 function providerResponseView(
@@ -451,7 +594,7 @@ export class GovernedJobService {
   readonly #provider?: ResponsesProvider;
   readonly #idFactory: () => string;
   readonly #now: () => Date;
-  readonly #jobs = new Map<string, JobRecord>();
+  #state: { jobs: Map<string, JobRecord>; store?: JobStore; failed: boolean };
 
   constructor(options: GovernedJobServiceOptions = {}) {
     this.#provider = options.provider;
@@ -459,9 +602,47 @@ export class GovernedJobService {
       options.idFactory ??
       (() => `job_${randomUUID().replaceAll("-", "")}`);
     this.#now = options.now ?? (() => new Date());
+    this.#state = { jobs: new Map(), store: options.store, failed: false };
+    for (const value of options.store?.load() ?? []) {
+      const stored = storedJobSchema.parse(value);
+      const ledger = ReservationLedger.restore(stored.ledger, GPT_5_4_MINI_STANDARD_RATE_CARD);
+      const attempts = new Map<string, ResponseAttempt>();
+      stored.attempts.forEach((attempt, index) => {
+        if (attempts.has(attempt.requestId) || attempt.sequence !== index + 1) {
+          throw new Error(`Invalid request sequence in saved job ${stored.id}.`);
+        }
+        attempts.set(attempt.requestId, attempt);
+      });
+      if (stored.nextAttemptSequence !== attempts.size + 1 || this.#state.jobs.has(stored.id)) {
+        throw new Error(`Invalid saved job ${stored.id}.`);
+      }
+      for (const reservation of ledger.getState().reservations) {
+        if (attempts.get(reservation.requestId)?.phase !== reservation.phase) {
+          throw new Error(`Missing request receipt in saved job ${stored.id}.`);
+        }
+      }
+      for (const attempt of attempts.values()) validateSavedOutcome(ledger, attempt);
+      this.#state.jobs.set(stored.id, {
+        id: stored.id,
+        createdAt: stored.createdAt,
+        ledger,
+        attempts,
+        nextAttemptSequence: stored.nextAttemptSequence
+      });
+    }
+    for (const record of this.#state.jobs.values()) {
+      this.#recoverInterrupted(record);
+    }
+  }
+
+  withProvider(provider: ResponsesProvider): GovernedJobService {
+    const service = new GovernedJobService({ provider, idFactory: this.#idFactory, now: this.#now });
+    service.#state = this.#state;
+    return service;
   }
 
   createJob(value: unknown): Record<string, unknown> {
+    this.#assertAvailable();
     const input = parseBody(
       createJobSchema,
       value,
@@ -520,7 +701,7 @@ export class GovernedJobService {
     }
 
     const id = this.#idFactory();
-    if (!JOB_ID_PATTERN.test(id) || this.#jobs.has(id)) {
+    if (!JOB_ID_PATTERN.test(id) || this.#state.jobs.has(id)) {
       throw new ApiError(
         "JOB_ID_UNAVAILABLE",
         "A unique job ID could not be allocated.",
@@ -560,12 +741,89 @@ export class GovernedJobService {
       attempts: new Map(),
       nextAttemptSequence: 1
     };
-    this.#jobs.set(id, record);
+    this.#persist(record);
+    this.#state.jobs.set(id, record);
     return jobView(record);
   }
 
   getJob(id: string): Record<string, unknown> {
     return jobView(this.#requireJob(id));
+  }
+
+  getReport(id: string) {
+    const record = this.#requireJob(id);
+    return {
+      object: "token_governor.report" as const,
+      schema_version: 1 as const,
+      generated_at: this.#now().toISOString(),
+      content_included: false as const,
+      job: jobView(record),
+      requests: [...record.attempts.values()].map((attempt) => {
+        const reservation = record.ledger.getReservation(attempt.requestId);
+        const usage = reservation?.usage;
+        const reason: unknown = attempt.outcome?.execution.reason;
+        return {
+          ...attemptSummary(attempt, id),
+          outcome_code: attempt.outcome?.kind === "error" ? attempt.outcome.code : null,
+          reason: typeof reason === "string" ? reason : null,
+          reservation: reservation === undefined ? null : {
+            ...reservationView(reservation),
+            protected_final_reserve_usd: formatMicroUsd(reservation.protectedFutureReserveMicroUsd)
+          },
+          usage: usage === undefined ? null : {
+            input_tokens: usage.inputTokens,
+            cached_input_tokens: usage.cachedInputTokens,
+            cache_write_input_tokens: usage.cacheWriteTokens,
+            output_tokens: usage.outputTokens,
+            reasoning_output_tokens: usage.reasoningOutputTokens,
+            total_tokens: usage.totalTokens ?? null
+          },
+          provider_response_id: reservation?.providerResponse?.id ?? null
+        };
+      })
+    };
+  }
+
+  listJobs(value: unknown = {}) {
+    this.#assertAvailable();
+    const input = parseBody(listJobsSchema, value, "INVALID_JOB_LIST_QUERY");
+    if (input.after !== undefined && !this.#state.jobs.has(input.after)) {
+      throw new ApiError(
+        "INVALID_JOB_CURSOR",
+        "after must identify an existing job in this service.",
+        400
+      );
+    }
+    const jobs = [...this.#state.jobs.values()].sort((left, right) => {
+      const createdDifference = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+      if (createdDifference !== 0) return createdDifference;
+      return left.id === right.id ? 0 : left.id < right.id ? 1 : -1;
+    });
+    const start = input.after === undefined
+      ? 0
+      : jobs.findIndex((record) => record.id === input.after) + 1;
+    const limit = input.limit ?? 25;
+    const page = jobs.slice(start, start + limit);
+    const hasMore = start + page.length < jobs.length;
+    const data = page.map((record) => {
+      const snapshot = record.ledger.getSnapshot();
+      return {
+        id: record.id,
+        created_at: record.createdAt,
+        status: jobStatus(snapshot, record.attempts),
+        budget_usd: formatMicroUsd(snapshot.policy.applicationCeilingMicroUsd),
+        settled_usd: formatMicroUsd(snapshot.settledMicroUsd),
+        reserved_usd: formatMicroUsd(snapshot.outstandingReservedMicroUsd),
+        responses_started: snapshot.responsesStarted,
+        max_responses: snapshot.policy.maxResponses
+      };
+    });
+    return {
+      object: "list" as const,
+      data,
+      has_more: hasMore,
+      next_after: hasMore ? page[page.length - 1].id : null
+    };
   }
 
   async getResponse(
@@ -595,10 +853,80 @@ export class GovernedJobService {
     };
   }
 
+  async quoteResponse(id: string, value: unknown, signal?: AbortSignal) {
+    const record = this.#requireJob(id);
+    const input = parseBody(quoteSchema, value, "INVALID_QUOTE_REQUEST");
+    const intent = prepareResponseInput(record, input);
+    const provider = this.#assertResponseAvailable(record);
+    signal?.throwIfAborted();
+    let exactInputTokens: number;
+    try {
+      exactInputTokens = await provider.countInput(intent.context, signal);
+      signal?.throwIfAborted();
+      if (!Number.isSafeInteger(exactInputTokens) || exactInputTokens < 0) {
+        throw new Error("Invalid input-token count.");
+      }
+    } catch {
+      signal?.throwIfAborted();
+      throw new ApiError("PREFLIGHT_FAILED", "The quote could not be counted by the provider.", 502);
+    }
+    this.#assertResponseAvailable(record);
+    const ledger = ReservationLedger.restore(record.ledger.getState(), GPT_5_4_MINI_STANDARD_RATE_CARD);
+    const pricing = ledger.getPricingIdentity();
+    const admission = ledger.reserve({
+      requestId: `quote:${randomUUID()}`,
+      exactInputTokens,
+      requestedMaxOutputTokens: intent.maxOutputTokens,
+      minimumUsefulOutputTokens: intent.minimumOutputTokens,
+      maximumCostMicroUsd: intent.maximumCostMicroUsd,
+      phase: input.phase,
+      binding: {
+        contextSha256: intent.contextSha256,
+        model: intent.context.model,
+        serviceTier: "default",
+        processingRegion: pricing.processingRegion
+      }
+    });
+    const snapshot = ledger.getSnapshot();
+    const cost = calculateWorstCaseRequestCost(
+      GPT_5_4_MINI_STANDARD_RATE_CARD,
+      exactInputTokens,
+      admission.admitted ? admission.reservation.maxOutputTokens : 0
+    );
+    return {
+      object: "token_governor.quote" as const,
+      job_id: id,
+      quoted_at: this.#now().toISOString(),
+      phase: input.phase,
+      model: pricing.model,
+      rate_card_version: pricing.rateCardVersion,
+      context_sha256: intent.contextSha256,
+      admitted: admission.admitted,
+      reason: admission.admitted ? null : admission.reason,
+      exact_input_tokens: exactInputTokens,
+      requested_max_output_tokens: intent.maxOutputTokens,
+      max_output_tokens: admission.admitted
+        ? admission.reservation.maxOutputTokens
+        : admission.admissibleMaxOutputTokens,
+      minimum_output_tokens: input.phase === "final"
+        ? Math.max(intent.minimumOutputTokens, snapshot.policy.minimumFinalOutputTokens)
+        : intent.minimumOutputTokens,
+      max_cost_micro_usd: admission.admitted ? admission.reservation.reservedMicroUsd : null,
+      max_cost_usd: admission.admitted ? formatMicroUsd(admission.reservation.reservedMicroUsd) : null,
+      input_cost_usd: formatMicroUsd(cost.inputMicroUsd),
+      output_cost_usd: admission.admitted ? formatMicroUsd(cost.outputMicroUsd) : null,
+      protected_final_reserve_usd: formatMicroUsd(input.phase === "work" ? snapshot.policy.finalAnswerReserveMicroUsd : 0),
+      available_after_usd: admission.admitted
+        ? formatMicroUsd(input.phase === "work" ? snapshot.availableForWorkMicroUsd : snapshot.uncommittedMicroUsd)
+        : null
+    };
+  }
+
   async createResponse(
     id: string,
     value: unknown,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options: { continueAfterDispatch?: boolean } = {}
   ): Promise<GovernedResponseServiceResult> {
     const record = this.#requireJob(id);
     const input = parseBody(
@@ -606,73 +934,8 @@ export class GovernedJobService {
       value,
       "INVALID_RESPONSE_REQUEST"
     );
-    if (this.#provider === undefined) {
-      throw new ApiError(
-        "PROVIDER_NOT_CONFIGURED",
-        "Set OPENAI_API_KEY before dispatching governed responses.",
-        503
-      );
-    }
-
-    const pricing = record.ledger.getPricingIdentity();
-    const model = input.model ?? pricing.model;
-    if (model !== pricing.model) {
-      throw new ApiError(
-        "MODEL_NOT_PRICED",
-        `This POC has a pinned rate card for ${pricing.model}.`,
-        400
-      );
-    }
-
-    const defaultMinimumOutputTokens =
-      input.phase === "final"
-        ? record.ledger.getSnapshot().policy
-            .minimumFinalOutputTokens
-        : DEFAULT_WORK_MINIMUM_OUTPUT_TOKENS;
-    const defaultMaxOutputTokens =
-      input.phase === "final"
-        ? Math.max(
-            DEFAULT_FINAL_MAX_OUTPUT_TOKENS,
-            defaultMinimumOutputTokens
-          )
-        : DEFAULT_WORK_MAX_OUTPUT_TOKENS;
-    const maxOutputTokens =
-      input.max_output_tokens ?? defaultMaxOutputTokens;
-    const minimumOutputTokens =
-      input.minimum_output_tokens ??
-      defaultMinimumOutputTokens;
-    if (minimumOutputTokens > maxOutputTokens) {
-      throw new ApiError(
-        "INVALID_RESPONSE_REQUEST",
-        "minimum_output_tokens cannot exceed max_output_tokens.",
-        400
-      );
-    }
-    if (input.phase === "final" && (input.tools?.length ?? 0) > 0) {
-      throw new ApiError(
-        "FINAL_TOOLS_NOT_ALLOWED",
-        "Final responses cannot declare tools.",
-        400
-      );
-    }
-
-    const proposedContext: ResponseContext = {
-      model,
-      input: input.input,
-      ...(input.instructions === undefined
-        ? {}
-        : { instructions: input.instructions }),
-      ...(input.tools === undefined
-        ? {}
-        : { tools: input.tools as JsonObject[] }),
-      service_tier: "default"
-    };
-    const intent = responseIntentFingerprint(
-      proposedContext,
-      input.phase,
-      maxOutputTokens,
-      minimumOutputTokens
-    );
+    const intent = prepareResponseInput(record, input);
+    const { maxOutputTokens, minimumOutputTokens, maximumCostMicroUsd } = intent;
     const existing = record.attempts.get(input.request_id);
     if (existing !== undefined) {
       if (existing.fingerprint !== intent.fingerprint) {
@@ -685,13 +948,7 @@ export class GovernedJobService {
       const outcome = await this.#awaitAttempt(existing);
       return this.#materializeOutcome(record, existing, outcome);
     }
-    if (record.attempts.size >= MAX_JOB_RESPONSE_ATTEMPTS) {
-      throw new ApiError(
-        "ATTEMPT_LIMIT_REACHED",
-        `A job can record at most ${MAX_JOB_RESPONSE_ATTEMPTS} response attempts.`,
-        429
-      );
-    }
+    this.#assertResponseAvailable(record);
 
     const attempt: ResponseAttempt = {
       sequence: record.nextAttemptSequence++,
@@ -701,16 +958,20 @@ export class GovernedJobService {
       startedAt: this.#now().toISOString()
     };
     record.attempts.set(input.request_id, attempt);
+    this.#persist(record);
     attempt.promise = this.#executeAttempt(
       record,
       attempt,
       intent.context,
       maxOutputTokens,
       minimumOutputTokens,
-      signal
+      maximumCostMicroUsd,
+      signal,
+      options.continueAfterDispatch ?? false
     ).then((outcome) => {
       attempt.outcome = outcome;
       attempt.promise = undefined;
+      this.#persist(record);
       return outcome;
     });
     const outcome = await attempt.promise;
@@ -724,6 +985,13 @@ export class GovernedJobService {
       value,
       "INVALID_FINALIZE_REQUEST"
     );
+    if ([...record.attempts.values()].some((attempt) => attempt.promise !== undefined)) {
+      throw new ApiError(
+        "JOB_BUSY",
+        "Wait for the current response attempt before finalizing the job.",
+        409
+      );
+    }
     try {
       record.ledger.finalizeFinalResponse(
         input.request_id,
@@ -739,7 +1007,22 @@ export class GovernedJobService {
       }
       throw error;
     }
+    this.#persist(record);
     return jobView(record);
+  }
+
+  #assertResponseAvailable(record: JobRecord): ResponsesProvider {
+    this.#assertAvailable();
+    if (this.#provider === undefined) {
+      throw new ApiError("PROVIDER_NOT_CONFIGURED", "Set OPENAI_API_KEY before dispatching governed responses.", 503);
+    }
+    if ([...record.attempts.values()].some((attempt) => attempt.promise !== undefined)) {
+      throw new ApiError("JOB_BUSY", "Wait for the current response attempt before submitting another request.", 409);
+    }
+    if (record.attempts.size >= MAX_JOB_RESPONSE_ATTEMPTS) {
+      throw new ApiError("ATTEMPT_LIMIT_REACHED", `A job can record at most ${MAX_JOB_RESPONSE_ATTEMPTS} response attempts.`, 429);
+    }
+    return this.#provider;
   }
 
   async #executeAttempt(
@@ -748,7 +1031,9 @@ export class GovernedJobService {
     context: ResponseContext,
     maxOutputTokens: number,
     minimumOutputTokens: number,
-    signal?: AbortSignal
+    maximumCostMicroUsd: number | undefined,
+    signal: AbortSignal | undefined,
+    continueAfterDispatch: boolean
   ): Promise<AttemptOutcome> {
     const result = await executeGovernedResponse({
       ledger: record.ledger,
@@ -757,8 +1042,11 @@ export class GovernedJobService {
       context,
       requestedMaxOutputTokens: maxOutputTokens,
       minimumUsefulOutputTokens: minimumOutputTokens,
+      maximumCostMicroUsd,
       phase: attempt.phase,
-      signal
+      signal,
+      continueAfterDispatch,
+      beforeDispatch: () => this.#persist(record)
     });
     const execution = structuredClone(executionView(result));
     if (result.status === "denied") {
@@ -843,6 +1131,7 @@ export class GovernedJobService {
   }
 
   #requireJob(id: string): JobRecord {
+    this.#assertAvailable();
     if (!JOB_ID_PATTERN.test(id)) {
       throw new ApiError(
         "INVALID_JOB_ID",
@@ -850,14 +1139,79 @@ export class GovernedJobService {
         400
       );
     }
-    const record = this.#jobs.get(id);
+    const record = this.#state.jobs.get(id);
     if (record === undefined) {
       throw new ApiError(
         "JOB_NOT_FOUND",
-        "The governed job does not exist in this process.",
+        "The governed job does not exist in this service.",
         404
       );
     }
     return record;
+  }
+
+  #assertAvailable(): void {
+    try {
+      if (this.#state.failed) {
+        throw new Error("A previous job storage write failed.");
+      }
+      this.#state.store?.assertAvailable();
+    } catch {
+      throw new ApiError("STORAGE_UNAVAILABLE", "Job storage is unavailable. Restart the service before spending.", 503);
+    }
+  }
+
+  #persist(record: JobRecord): void {
+    this.#assertAvailable();
+    try {
+      this.#state.store?.save(record.id, {
+        version: 1,
+        id: record.id,
+        createdAt: record.createdAt,
+        ledger: record.ledger.getState(),
+        nextAttemptSequence: record.nextAttemptSequence,
+        attempts: [...record.attempts.values()].map(({ promise: _promise, ...attempt }) => attempt)
+      });
+    } catch {
+      this.#state.failed = true;
+      throw new ApiError("STORAGE_UNAVAILABLE", "The job could not be saved. Further spending is blocked until the service restarts.", 503);
+    }
+  }
+
+  #recoverInterrupted(record: JobRecord): void {
+    let changed = false;
+    for (const attempt of record.attempts.values()) {
+      if (attempt.outcome !== undefined) continue;
+      let reservation = record.ledger.getReservation(attempt.requestId);
+      if (reservation?.status === "in_flight") {
+        reservation = record.ledger.markAmbiguous(attempt.requestId, "transport_error");
+      }
+      if (reservation?.status === "ambiguous") {
+        attempt.outcome = {
+          kind: "response",
+          statusCode: 202,
+          execution: {
+            status: "unresolved",
+            reason: "service_restarted",
+            reservation: reservationView(reservation),
+            response: null,
+            provider_error: null
+          }
+        };
+      } else if (reservation === undefined || reservation.status === "reserved") {
+        if (reservation !== undefined) record.ledger.release(attempt.requestId);
+        attempt.outcome = {
+          kind: "error",
+          statusCode: 502,
+          code: "PREFLIGHT_FAILED",
+          message: "The service restarted before dispatch. Submit a new request ID to continue.",
+          execution: { status: "preflight_failed", reason: "service_restarted" }
+        };
+      } else {
+        throw new Error(`Missing completed response in saved job ${record.id}.`);
+      }
+      changed = true;
+    }
+    if (changed) this.#persist(record);
   }
 }

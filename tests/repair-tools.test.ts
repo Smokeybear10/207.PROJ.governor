@@ -105,6 +105,22 @@ describe("repair toolbox", () => {
     expect(sandbox.applied[0][0]).toEqual({ path: "a.ts", oldText: "x", newText: "y" });
   });
 
+  it("does not apply edits after cancellation", async () => {
+    const sandbox = fakeSandbox({ "a.ts": "x" }, { exitCode: 0, stdout: "" });
+    const toolbox = createRepairToolbox(sandbox, fakeArtifactStore());
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      toolbox.execute(
+        "apply_patch",
+        { edits: [{ path: "a.ts", old_text: "x", new_text: "y" }] },
+        controller.signal
+      )
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(sandbox.applied).toEqual([]);
+  });
+
   it("run_tests reduces the log, stays within 16 KB, and reports pass state", async () => {
     const bigLog = "FAIL suite/x\nAssertionError: boom\n" + "noise line\n".repeat(50_000);
     const store = fakeArtifactStore();

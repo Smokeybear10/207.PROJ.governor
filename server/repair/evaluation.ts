@@ -5,9 +5,9 @@ import type { RepairEvaluation, RepairFixture, RepairSandbox } from "./types.js"
  * Sealed ground-truth evaluation. Verifies the change policy against the agent's
  * sandbox, then runs the pinned test command in a FRESH, pristine checkout that
  * carries over only the agent's allowlisted file contents (see
- * {@link verifyFinalState}). This is never exposed to the agent, so success
- * cannot be gamed by manipulating tool output or by writing anything outside the
- * allowlist inside the agent's own working tree.
+ * {@link verifyFinalState}). Working-tree test edits and tool-output claims
+ * cannot substitute for this fresh run. Tests still share a process with the
+ * generated code, so a zero exit status is not adversarial proof of correctness.
  *
  * Success requires: the target suite passes (exit code 0), no protected path
  * was modified, and the number of edited files does not exceed the fixture's

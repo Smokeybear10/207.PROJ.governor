@@ -4,6 +4,7 @@ import {
   type GovernorPolicy
 } from "../governor/index.js";
 import { GovernedJobService } from "../jobs/index.js";
+import type { ResponsesProvider } from "../runtime/index.js";
 import {
   createResponsesProvider,
   resolveProviderMode,
@@ -38,6 +39,7 @@ export interface RepairRunOptions {
   readonly fixtureId?: string;
   readonly mode?: ProviderMode;
   readonly signal?: AbortSignal;
+  readonly createService?: (provider: ResponsesProvider) => GovernedJobService;
 }
 
 export interface RepairRunResponse {
@@ -59,7 +61,7 @@ export async function runRepairDemo(
   const scripted =
     mode === "live" ? undefined : scriptedProviderFor(fixtureId);
   const provider = createResponsesProvider({ mode, scripted });
-  const service = new GovernedJobService({ provider });
+  const service = options.createService?.(provider) ?? new GovernedJobService({ provider });
   const sandbox = await createRepairSandbox(fixture);
   const jobId = `repair-${fixtureId}-${Date.now()}`;
 

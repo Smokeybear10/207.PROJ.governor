@@ -30,13 +30,15 @@ export type BudgetToolName = (typeof BUDGET_TOOL_NAMES)[number];
 
 /**
  * A broken-repo fixture template. `rootDir` is copied into a fresh temp working
- * copy for every run. Only `allowlistedPaths` may be read/edited by the agent;
- * `protectedPaths` (e.g. test files) must never be modified by a patch.
+ * copy for every run. Only `allowlistedPaths` may be edited by the agent;
+ * `readonlyPaths` exposes test/context files without granting edit access.
+ * `protectedPaths` must never be modified by a patch.
  */
 export interface RepairFixture {
   readonly id: string;
   readonly rootDir: string;
   readonly allowlistedPaths: readonly string[];
+  readonly readonlyPaths?: readonly string[];
   readonly protectedPaths: readonly string[];
   readonly testCommand: readonly string[];
   readonly maxEditFiles: number;
@@ -46,6 +48,7 @@ export interface SandboxFileInfo {
   readonly path: string;
   readonly lines: number;
   readonly bytes: number;
+  readonly editable?: boolean;
 }
 
 export interface SandboxEdit {
@@ -69,8 +72,9 @@ export interface SandboxTestRun {
 }
 
 /**
- * An isolated, mutable working copy of a fixture. All destructive operations
- * (edits, test execution) happen only inside `dir`, never in the real repo.
+ * A disposable working copy of a fixture. On macOS, tests run under a deny-default
+ * OS profile with read-only fixture access and no networking or subprocesses.
+ * Unsupported platforms fail closed; this is not a virtual machine or CPU/RAM quota.
  * `revision()` is a SHA-256 over the sorted allowlisted file contents and is
  * used as the retry-suppression `stateRevision`.
  */
@@ -78,6 +82,7 @@ export interface RepairSandbox {
   readonly id: string;
   readonly dir: string;
   readonly allowlistedPaths: readonly string[];
+  readonly readonlyPaths?: readonly string[];
   readonly protectedPaths: readonly string[];
   revision(): string;
   listFiles(): readonly SandboxFileInfo[];

@@ -33,6 +33,7 @@ export {
   type ExactInputAdmission,
   type GovernorPolicy,
   type LedgerSnapshot,
+  type LedgerState,
   type ProviderReconciliation,
   type ProviderRejectionEvidence,
   type ProviderResponseEvidence,

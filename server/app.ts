@@ -8,8 +8,10 @@ import express, {
 import { createDemoRun, getDemoCatalog } from "./demo/index.js";
 import { ApiError, errorMessage } from "./errors.js";
 import { runRepairDemo } from "./repair/api.js";
+import { RepositoryRepairRuns } from "./repair/repository-runs.js";
 import { resolveProviderMode, type ProviderMode } from "./openai/provider-factory.js";
 import { GovernedJobService } from "./jobs/index.js";
+import type { JobStore } from "./jobs/store.js";
 import { OpenAiResponsesClient } from "./openai/index.js";
 import type { ResponsesProvider } from "./runtime/index.js";
 
@@ -22,6 +24,8 @@ export type CreateAppOptions = {
   readonly now?: () => Date;
   readonly exposeGovernedApi?: boolean;
   readonly forcedRepairMode?: ProviderMode;
+  readonly jobStore?: JobStore;
+  readonly repairStore?: JobStore;
 };
 
 function applySecurityHeaders(
@@ -143,7 +147,7 @@ const handleError: ErrorRequestHandler = (
     response.status(413).json({
       error: {
         code: "PAYLOAD_TOO_LARGE",
-        message: `Request bodies are limited to ${BODY_LIMIT}.`
+        message: "The request body exceeds the configured size limit."
       }
     });
     return;
@@ -189,15 +193,18 @@ export function createApp(options: CreateAppOptions = {}): Express {
       ? undefined
       : (options.provider ?? configuredProvider());
   const jobs = new GovernedJobService({
+    store: options.jobStore,
     ...(provider === undefined ? {} : { provider }),
     ...(options.jobIdFactory === undefined
       ? {}
       : { idFactory: options.jobIdFactory }),
     ...(options.now === undefined ? {} : { now: options.now })
   });
+  const repositoryRuns = new RepositoryRepairRuns(jobs, options.repairStore);
   app.disable("x-powered-by");
   app.use(applySecurityHeaders);
   app.use(requireLocalRequest);
+  app.use("/api/repair/repository", express.json({ limit: "1mb" }));
   app.use(express.json({ limit: BODY_LIMIT }));
 
   app.get("/api/health", (_request, response) => {
@@ -260,7 +267,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
       const result = await runRepairDemo({
         fixtureId,
         mode,
-        signal: cancellation.signal
+        signal: cancellation.signal,
+        createService: (repairProvider) => jobs.withProvider(repairProvider)
       });
       if (!cancellation.signal.aborted) {
         response.status(201).json(result);
@@ -274,6 +282,23 @@ export function createApp(options: CreateAppOptions = {}): Express {
     }
   });
 
+  app.use("/api/repair/repository", (_request, _response, next) => {
+    if (!exposeGovernedApi || (options.forcedRepairMode !== undefined && options.forcedRepairMode !== "live")) {
+      next(new ApiError("NOT_FOUND", "Repository repair is not enabled on this service.", 404));
+      return;
+    }
+    next();
+  });
+  app.post("/api/repair/repository/runs", (request, response) => {
+    response.set("Cache-Control", "no-store");
+    if (!provider) throw new ApiError("PROVIDER_NOT_CONFIGURED", "Set an OpenAI API key before repairing a workspace. The sample demo does not repair your files.", 503);
+    response.status(202).json(repositoryRuns.start(request.body));
+  });
+  app.get("/api/repair/repository/runs/:requestId", (request, response) => {
+    response.set("Cache-Control", "no-store");
+    response.json(repositoryRuns.get(request.params.requestId));
+  });
+
   if (!exposeGovernedApi) {
     app.use("/v1", (_request, _response, next) => {
       next(new ApiError("NOT_FOUND", "The API route does not exist.", 404));
@@ -285,9 +310,19 @@ export function createApp(options: CreateAppOptions = {}): Express {
     response.status(201).json(jobs.createJob(request.body));
   });
 
+  app.get("/v1/jobs", (request, response) => {
+    response.set("Cache-Control", "no-store");
+    response.json(jobs.listJobs(request.query));
+  });
+
   app.get("/v1/jobs/:jobId", (request, response) => {
     response.set("Cache-Control", "no-store");
     response.json(jobs.getJob(request.params.jobId));
+  });
+
+  app.get("/v1/jobs/:jobId/report", (request, response) => {
+    response.set("Cache-Control", "no-store");
+    response.json(jobs.getReport(request.params.jobId));
   });
 
   app.get(
@@ -303,6 +338,22 @@ export function createApp(options: CreateAppOptions = {}): Express {
   );
 
   app.post(
+    "/v1/jobs/:jobId/quote",
+    async (request, response, next) => {
+      response.set("Cache-Control", "no-store");
+      const cancellation = requestCancellation(request, response);
+      try {
+        const quote = await jobs.quoteResponse(request.params.jobId, request.body, cancellation.signal);
+        if (!cancellation.signal.aborted) response.json(quote);
+      } catch (error) {
+        if (!cancellation.signal.aborted) next(error);
+      } finally {
+        cancellation.dispose();
+      }
+    }
+  );
+
+  app.post(
     "/v1/jobs/:jobId/responses",
     async (request, response, next) => {
       response.set("Cache-Control", "no-store");
@@ -311,7 +362,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
         const result = await jobs.createResponse(
           request.params.jobId,
           request.body,
-          cancellation.signal
+          cancellation.signal,
+          { continueAfterDispatch: true }
         );
         if (!cancellation.signal.aborted) {
           response.status(result.statusCode).json(result.body);

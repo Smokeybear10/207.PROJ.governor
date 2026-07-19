@@ -1,8 +1,9 @@
 import { once } from "node:events";
-import type { Server } from "node:http";
+import { get as httpGet, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { createApp } from "../server/app.js";
+import { createApp, type CreateAppOptions } from "../server/app.js";
+import type { GovernedJobService } from "../server/jobs/index.js";
 import { OpenAiApiError } from "../server/openai/index.js";
 import type {
   GovernedResponseRequest,
@@ -11,6 +12,7 @@ import type {
 import type { ResponsesProvider } from "../server/runtime/index.js";
 
 const servers: Server[] = [];
+type ListedJobs = ReturnType<GovernedJobService["listJobs"]>;
 
 type StartedApp = {
   readonly baseUrl: string;
@@ -18,7 +20,8 @@ type StartedApp = {
 };
 
 async function startApp(
-  provider?: ResponsesProvider | null
+  provider?: ResponsesProvider | null,
+  options: Omit<CreateAppOptions, "provider"> = {}
 ): Promise<StartedApp> {
   const requests: GovernedResponseRequest[] = [];
   let responseNumber = 0;
@@ -63,7 +66,8 @@ async function startApp(
         ? defaultProvider
         : provider,
     jobIdFactory: () => "job_test",
-    now: () => new Date("2026-07-18T12:00:00.000Z")
+    now: () => new Date("2026-07-18T12:00:00.000Z"),
+    ...options
   });
   const server = app.listen(0, "127.0.0.1");
   servers.push(server);
@@ -612,6 +616,10 @@ describe("governed jobs API", () => {
     const gate = new Promise<void>((resolve) => {
       releaseResponse = resolve;
     });
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
     let countCalls = 0;
     let createCalls = 0;
     const provider: ResponsesProvider = {
@@ -621,6 +629,7 @@ describe("governed jobs API", () => {
       },
       async createResponse() {
         createCalls += 1;
+        markStarted?.();
         await gate;
         return {
           id: "resp_race",
@@ -655,7 +664,7 @@ describe("governed jobs API", () => {
 
     const first = send();
     const second = send();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await started;
     expect(countCalls).toBe(1);
     expect(createCalls).toBe(1);
     releaseResponse?.();
@@ -758,5 +767,144 @@ describe("governed jobs API", () => {
     );
     expect(final.status).toBe(200);
     expect(requests[0]?.max_output_tokens).toBe(2_000);
+  });
+});
+
+describe("saved job listing", () => {
+  it("returns an empty page without a provider and prevents caching", async () => {
+    const { baseUrl, requests } = await startApp(null);
+    const response = await fetch(`${baseUrl}/v1/jobs`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      object: "list", data: [], has_more: false, next_after: null
+    });
+    expect(requests).toHaveLength(0);
+  });
+
+  it("paginates by creation time and descending ID without repeating newer inserts", async () => {
+    const entries = [
+      { id: "job_a", createdAt: "2026-11-06T12:00:00.000Z" },
+      { id: "job_c", createdAt: "2026-11-06T12:01:00.000Z" },
+      { id: "job_b", createdAt: "2026-11-06T12:01:00.000Z" },
+      { id: "job_d", createdAt: "2026-11-06T12:00:00.000Z" },
+      { id: "job_new", createdAt: "2026-11-06T12:02:00.000Z" }
+    ];
+    let next = 0;
+    const { baseUrl } = await startApp(null, {
+      jobIdFactory: () => entries[next++].id,
+      now: () => new Date(entries[next - 1].createdAt)
+    });
+    for (let index = 0; index < 4; index += 1) {
+      expect((await createJob(baseUrl)).status).toBe(201);
+    }
+    const first = await (await fetch(`${baseUrl}/v1/jobs?limit=2`)).json() as ListedJobs;
+    expect(first.data.map((job) => job.id)).toEqual(["job_c", "job_b"]);
+    expect(first).toMatchObject({ has_more: true, next_after: "job_b" });
+
+    expect((await createJob(baseUrl)).status).toBe(201);
+    const second = await (await fetch(`${baseUrl}/v1/jobs?limit=2&after=${first.next_after}`)).json() as ListedJobs;
+    expect(second.data.map((job) => job.id)).toEqual(["job_d", "job_a"]);
+    expect(second).toMatchObject({ has_more: false, next_after: null });
+    const refreshed = await (await fetch(`${baseUrl}/v1/jobs?limit=1`)).json() as ListedJobs;
+    expect(refreshed.data.map((job) => job.id)).toEqual(["job_new"]);
+    expect(await (await fetch(`${baseUrl}/v1/jobs?after=job_a`)).json()).toEqual({
+      object: "list", data: [], has_more: false, next_after: null
+    });
+  });
+
+  it("defaults to 25 summaries and accepts a bounded maximum of 100", async () => {
+    let sequence = 0;
+    const { baseUrl } = await startApp(null, {
+      jobIdFactory: () => `job_${String(sequence++).padStart(2, "0")}`
+    });
+    for (let index = 0; index < 26; index += 1) await createJob(baseUrl);
+    const page = await (await fetch(`${baseUrl}/v1/jobs`)).json() as ListedJobs;
+    expect(page.data).toHaveLength(25);
+    expect(page).toMatchObject({ has_more: true, next_after: "job_01" });
+    const fullPage = await (await fetch(`${baseUrl}/v1/jobs?limit=100`)).json() as ListedJobs;
+    expect(fullPage.data).toHaveLength(26);
+    expect(fullPage).toMatchObject({ has_more: false, next_after: null });
+  });
+
+  it("exposes only job metadata and accounting, without saved request or response content", async () => {
+    const { baseUrl, requests } = await startApp();
+    await createJob(baseUrl);
+    const response = await fetch(`${baseUrl}/v1/jobs/job_test/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request_id: "private-request-id",
+        phase: "work",
+        input: "Private input text",
+        instructions: "Private instructions"
+      })
+    });
+    expect(response.status).toBe(200);
+    const listing = await (await fetch(`${baseUrl}/v1/jobs`)).json() as ListedJobs;
+    expect(listing).toEqual({
+      object: "list",
+      data: [{
+        id: "job_test",
+        created_at: "2026-07-18T12:00:00.000Z",
+        status: "open",
+        budget_usd: "0.075000",
+        settled_usd: "0.000165",
+        reserved_usd: "0.000000",
+        responses_started: 1,
+        max_responses: 4
+      }],
+      has_more: false,
+      next_after: null
+    });
+    expect(JSON.stringify(listing)).not.toMatch(/Private|Working\.|private-request-id|resp_1/);
+    expect(requests).toHaveLength(1);
+  });
+
+  it.each([
+    "limit=0", "limit=101", "limit=-1", "limit=1.5", "limit=1e2",
+    "limit=", "limit=01", "limit=2&limit=3", "after=", "after=..%2Fjob",
+    "after=job_test&after=job_test", "limit[value]=2", "unexpected=true"
+  ])("rejects an invalid list query: %s", async (query) => {
+    const { baseUrl } = await startApp(null);
+    const response = await fetch(`${baseUrl}/v1/jobs?${query}`);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "INVALID_JOB_LIST_QUERY" } });
+  });
+
+  it("rejects an unknown cursor instead of resetting to the first page", async () => {
+    const { baseUrl } = await startApp(null);
+    await createJob(baseUrl);
+    const response = await fetch(`${baseUrl}/v1/jobs?after=job_missing`);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "INVALID_JOB_CURSOR" } });
+  });
+
+  it("enforces local requests and the disabled API gate for saved job discovery", async () => {
+    const { baseUrl } = await startApp(null);
+    const hostileHost = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+      const request = httpGet(`${baseUrl}/v1/jobs`, {
+        headers: { Host: "attacker.example" }
+      }, (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => { body += chunk; });
+        response.on("error", reject);
+        response.on("end", () => resolve({
+          status: response.statusCode ?? 0,
+          body: JSON.parse(body) as unknown
+        }));
+      });
+      request.on("error", reject);
+    });
+    expect(hostileHost.status).toBe(403);
+    expect(hostileHost.body).toMatchObject({ error: { code: "HOST_NOT_ALLOWED" } });
+    const browser = await fetch(`${baseUrl}/v1/jobs`, { headers: { Origin: "https://attacker.example" } });
+    expect(browser.status).toBe(403);
+    expect(await browser.json()).toMatchObject({ error: { code: "BROWSER_ORIGIN_NOT_ALLOWED" } });
+    const hidden = await startApp(null, { exposeGovernedApi: false });
+    const disabled = await fetch(`${hidden.baseUrl}/v1/jobs`);
+    expect(disabled.status).toBe(404);
+    expect(await disabled.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
   });
 });

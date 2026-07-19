@@ -8,6 +8,7 @@ import {
   calculateWorstCaseRequestCost,
   createGovernorPolicy,
   createRateCard,
+  normalizeProviderUsage,
   type ExactInputAdmission,
   type GovernorPolicy,
   type ProviderResponseEvidence,
@@ -841,5 +842,391 @@ describe("reservation ledger", () => {
       usage({ inputTokens: 1, outputTokens: 1 })
     );
     expect(ledger.getSnapshot().responsesStarted).toBe(3);
+  });
+});
+
+describe("per-request spending ceilings", () => {
+  it("caps the reservation and restores it exactly without storing the ceiling", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    const result = reserve(ledger, {
+      requestId: "capped-work",
+      exactInputTokens: 10,
+      requestedMaxOutputTokens: 100,
+      minimumUsefulOutputTokens: 5,
+      maximumCostMicroUsd: 32,
+      phase: "work"
+    });
+
+    expect(result).toMatchObject({
+      admitted: true,
+      reservation: {
+        maxOutputTokens: 10,
+        reservedMicroUsd: 32,
+        protectedFutureReserveMicroUsd: 30
+      }
+    });
+    dispatch(ledger, "capped-work");
+    const saved: unknown = JSON.parse(JSON.stringify(ledger.getState()));
+    expect(ReservationLedger.restore(saved, rateCard).getState()).toEqual(ledger.getState());
+    settle(ledger, "capped-work", usage({ outputTokens: 10 }));
+    expect(ReservationLedger.restore(ledger.getState(), rateCard).getState()).toEqual(ledger.getState());
+  });
+
+  it.each([undefined, 70, 100])(
+    "preserves the final reserve with a nonbinding ceiling of %s",
+    (maximumCostMicroUsd) => {
+      const ledger = new ReservationLedger(policy, rateCard);
+      expect(reserve(ledger, {
+        requestId: "work",
+        exactInputTokens: 10,
+        requestedMaxOutputTokens: 100,
+        minimumUsefulOutputTokens: 5,
+        maximumCostMicroUsd,
+        phase: "work"
+      })).toMatchObject({
+        admitted: true,
+        reservation: { maxOutputTokens: 29, reservedMicroUsd: 70 }
+      });
+      expect(ledger.getSnapshot().uncommittedMicroUsd).toBe(30);
+    }
+  );
+
+  it.each([
+    { maximumCostMicroUsd: 11, minimumUsefulOutputTokens: 1, admissibleMaxOutputTokens: 0 },
+    { maximumCostMicroUsd: 20, minimumUsefulOutputTokens: 5, admissibleMaxOutputTokens: 4 }
+  ])("denies an unaffordable request ceiling without mutation: $maximumCostMicroUsd", (input) => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    const before = ledger.getState();
+    expect(reserve(ledger, {
+      requestId: "over-request-limit",
+      exactInputTokens: 10,
+      requestedMaxOutputTokens: 100,
+      minimumUsefulOutputTokens: input.minimumUsefulOutputTokens,
+      maximumCostMicroUsd: input.maximumCostMicroUsd,
+      phase: "work"
+    })).toEqual({
+      admitted: false,
+      reason: "REQUEST_COST_LIMIT",
+      availableMicroUsd: input.maximumCostMicroUsd,
+      admissibleMaxOutputTokens: input.admissibleMaxOutputTokens
+    });
+    expect(ledger.getState()).toEqual(before);
+  });
+
+  it("applies the ceiling to final responses without lowering the final output minimum", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    const input = {
+      requestId: "final",
+      exactInputTokens: 10,
+      requestedMaxOutputTokens: 100,
+      minimumUsefulOutputTokens: 1,
+      phase: "final" as const
+    };
+    expect(reserve(ledger, { ...input, maximumCostMicroUsd: 29 })).toMatchObject({
+      admitted: false,
+      reason: "REQUEST_COST_LIMIT",
+      admissibleMaxOutputTokens: 8
+    });
+    expect(reserve(ledger, { ...input, maximumCostMicroUsd: 30 })).toMatchObject({
+      admitted: true,
+      reservation: {
+        maxOutputTokens: 9,
+        reservedMicroUsd: 30,
+        protectedFutureReserveMicroUsd: 0
+      }
+    });
+  });
+
+  it("keeps existing denial reasons when the request would fail without a ceiling", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    expect(reserve(ledger, {
+      requestId: "input-too-large",
+      exactInputTokens: 100,
+      requestedMaxOutputTokens: 100,
+      minimumUsefulOutputTokens: 1,
+      maximumCostMicroUsd: 10,
+      phase: "work"
+    })).toMatchObject({ admitted: false, reason: "INPUT_EXCEEDS_AVAILABLE_BUDGET" });
+    expect(reserve(ledger, {
+      requestId: "output-too-small",
+      exactInputTokens: 10,
+      requestedMaxOutputTokens: 8,
+      minimumUsefulOutputTokens: 1,
+      maximumCostMicroUsd: 10,
+      phase: "final"
+    })).toMatchObject({ admitted: false, reason: "OUTPUT_BELOW_MINIMUM" });
+    expect(ledger.getState().reservations).toEqual([]);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects an invalid ceiling of %s without mutation",
+    (maximumCostMicroUsd) => {
+      const ledger = new ReservationLedger(policy, rateCard);
+      const before = ledger.getState();
+      expect(() => reserve(ledger, {
+        requestId: "invalid-ceiling",
+        exactInputTokens: 10,
+        requestedMaxOutputTokens: 100,
+        minimumUsefulOutputTokens: 1,
+        maximumCostMicroUsd,
+        phase: "work"
+      })).toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+      expect(ledger.getState()).toEqual(before);
+    }
+  );
+});
+
+describe("reservation ledger persistence", () => {
+  function savedCopy(ledger: ReservationLedger): unknown {
+    return JSON.parse(JSON.stringify(ledger.getState()));
+  }
+
+  function reserveWork(ledger: ReservationLedger, requestId: string) {
+    const admission = reserve(ledger, {
+      requestId,
+      exactInputTokens: 10,
+      requestedMaxOutputTokens: 5,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    });
+    expect(admission.admitted).toBe(true);
+  }
+
+  it("restores charged history and provider response deduplication", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    reserveWork(ledger, "released");
+    ledger.release("released");
+    reserveWork(ledger, "cancelled");
+    ledger.cancel("cancelled");
+    reserveWork(ledger, "rejected");
+    dispatch(ledger, "rejected");
+    ledger.releaseProviderRejection("rejected", {
+      httpStatus: 429,
+      requestId: "provider-rejection"
+    });
+    reserveWork(ledger, "settled");
+    dispatch(ledger, "settled");
+    settle(ledger, "settled", usage());
+
+    const restored = ReservationLedger.restore(savedCopy(ledger), rateCard);
+    expect(restored.getState()).toEqual(ledger.getState());
+    expect(restored.getSnapshot()).toMatchObject({
+      responsesStarted: 2,
+      settledMicroUsd: 20,
+      outstandingReservedMicroUsd: 0
+    });
+    expect(reserve(restored, {
+      requestId: "released",
+      exactInputTokens: 1,
+      requestedMaxOutputTokens: 1,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    })).toMatchObject({ admitted: false, reason: "DUPLICATE_REQUEST_ID" });
+    reserveWork(restored, "duplicate-provider");
+    dispatch(restored, "duplicate-provider");
+    expect(() => settle(
+      restored,
+      "duplicate-provider",
+      usage(),
+      providerEvidence({ id: "resp_settled" })
+    )).toThrow("already been settled");
+    expect(restored.getSnapshot().settledMicroUsd).toBe(20);
+  });
+
+  it.each(["reserved", "in_flight", "ambiguous"] as const)(
+    "keeps the full %s reservation unavailable after restart",
+    (status) => {
+      const ledger = new ReservationLedger(policy, rateCard);
+      reserveWork(ledger, "interrupted");
+      if (status !== "reserved") {
+        dispatch(ledger, "interrupted");
+      }
+      if (status === "ambiguous") {
+        ledger.markAmbiguous("interrupted", "transport_error", {
+          usageSource: "provider",
+          inputTokens: 10
+        });
+      }
+      const restored = ReservationLedger.restore(savedCopy(ledger), rateCard);
+      expect(restored.getState()).toEqual(ledger.getState());
+      expect(restored.getSnapshot().outstandingReservedMicroUsd).toBeGreaterThan(0);
+      expect(reserve(restored, {
+        requestId: "later",
+        exactInputTokens: 1,
+        requestedMaxOutputTokens: 1,
+        minimumUsefulOutputTokens: 1,
+        phase: "work"
+      })).toMatchObject({ admitted: false, reason: "UNRESOLVED_REQUEST" });
+      if (status === "in_flight") {
+        restored.markAmbiguous("interrupted", "transport_error");
+        expect(restored.getSnapshot().committedMicroUsd).toBe(
+          ledger.getSnapshot().committedMicroUsd
+        );
+      }
+    }
+  );
+
+  it("retains cancellation evidence and reconciles it once after restart", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    reserveWork(ledger, "cancelled");
+    dispatch(ledger, "cancelled");
+    ledger.cancel("cancelled", { kind: "unknown", observedUsage: usage() });
+    const restored = ReservationLedger.restore(savedCopy(ledger), rateCard);
+    restored.cancel("cancelled", {
+      kind: "usage",
+      usage: usage(),
+      evidence: providerEvidence({ status: "cancelled" })
+    });
+    const settled = ReservationLedger.restore(savedCopy(restored), rateCard);
+    expect(settled.getState()).toEqual(restored.getState());
+    expect(settled.getReservation("cancelled")).toMatchObject({
+      status: "settled",
+      terminalReason: "cancelled_with_usage"
+    });
+    expect(settled.getSnapshot().settledMicroUsd).toBe(20);
+  });
+
+  it.each(["timeout", "ambiguity", "cancellation"] as const)(
+    "rejects invalid %s observations without mutating durable ledger state",
+    (transition) => {
+      const ledger = new ReservationLedger(policy, rateCard);
+      reserveWork(ledger, "work");
+      dispatch(ledger, "work");
+      const before = ledger.getState();
+      const observation = { usageSource: "provider" as const, inputTokens: -1 };
+      expect(() => {
+        if (transition === "timeout") ledger.markTimedOut("work", observation);
+        else if (transition === "ambiguity") ledger.markAmbiguous("work", "transport_error", observation);
+        else ledger.cancel("work", { kind: "unknown", observedUsage: observation });
+      }).toThrow(GovernorError);
+      expect(ledger.getState()).toEqual(before);
+      expect(ReservationLedger.restore(savedCopy(ledger), rateCard).getState()).toEqual(before);
+    }
+  );
+
+  it.each(["timeout", "ambiguity", "cancellation"] as const)(
+    "persists normalized provider usage as a schema-compatible %s observation",
+    (transition) => {
+      const ledger = new ReservationLedger(policy, rateCard);
+      reserveWork(ledger, "work");
+      dispatch(ledger, "work");
+      const observation = normalizeProviderUsage(usage({
+        cachedInputTokens: 2,
+        cacheWriteTokens: 1,
+        reasoningOutputTokens: 1,
+        totalTokens: 15
+      }));
+      if (transition === "timeout") ledger.markTimedOut("work", observation);
+      else if (transition === "ambiguity") ledger.markAmbiguous("work", "transport_error", observation);
+      else ledger.cancel("work", { kind: "unknown", observedUsage: observation });
+
+      const restored = ReservationLedger.restore(savedCopy(ledger), rateCard);
+      expect(restored.getState()).toEqual(ledger.getState());
+      expect(restored.getSnapshot().outstandingReservedMicroUsd).toBeGreaterThan(0);
+      expect(restored.getReservation("work")?.ambiguity?.observedUsage).toEqual({
+        usageSource: "provider",
+        inputTokens: 10,
+        cachedInputTokens: 2,
+        cacheWriteTokens: 1,
+        outputTokens: 5,
+        reasoningOutputTokens: 1,
+        totalTokens: 15
+      });
+    }
+  );
+
+  it.each([true, false])("retains final validation and accepted=%s closure", (accepted) => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    expect(reserve(ledger, {
+      requestId: "final",
+      exactInputTokens: 10,
+      requestedMaxOutputTokens: 9,
+      minimumUsefulOutputTokens: 9,
+      phase: "final"
+    }).admitted).toBe(true);
+    dispatch(ledger, "final");
+    settle(ledger, "final", usage());
+    const pending = ReservationLedger.restore(savedCopy(ledger), rateCard);
+    expect(pending.getSnapshot()).toMatchObject({
+      pendingFinalValidationRequestId: "final",
+      closed: false,
+      completionAccepted: null
+    });
+    pending.finalizeFinalResponse("final", accepted);
+    const finished = ReservationLedger.restore(savedCopy(pending), rateCard);
+    expect(finished.getState()).toEqual(pending.getState());
+    expect(finished.getSnapshot()).toMatchObject({
+      pendingFinalValidationRequestId: null,
+      closed: true,
+      completionAccepted: accepted
+    });
+    expect(reserve(finished, {
+      requestId: "later",
+      exactInputTokens: 1,
+      requestedMaxOutputTokens: 1,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    })).toMatchObject({ admitted: false, reason: "JOB_CLOSED" });
+  });
+
+  it("restores a stopped job and an exhausted work response allowance", () => {
+    const ledger = new ReservationLedger({ ...policy, maxResponses: 2 }, rateCard);
+    reserveWork(ledger, "work");
+    dispatch(ledger, "work");
+    settle(ledger, "work", usage());
+    const restored = ReservationLedger.restore(savedCopy(ledger), rateCard);
+    expect(reserve(restored, {
+      requestId: "later",
+      exactInputTokens: 1,
+      requestedMaxOutputTokens: 1,
+      minimumUsefulOutputTokens: 1,
+      phase: "work"
+    })).toMatchObject({ admitted: false, reason: "RESPONSE_LIMIT_REACHED" });
+    restored.closeStoppedJob();
+    expect(ReservationLedger.restore(savedCopy(restored), rateCard).getSnapshot())
+      .toEqual(restored.getSnapshot());
+  });
+
+  it("rejects corrupted accounting, reservations, evidence, and versions", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    reserveWork(ledger, "work");
+    dispatch(ledger, "work");
+    settle(ledger, "work", usage());
+    const state = ledger.getState();
+    const reservation = state.reservations[0];
+    const corruptStates = [
+      null,
+      { ...state, version: 2 },
+      { ...state, ignored: true },
+      { ...state, settledMicroUsd: 0 },
+      { ...state, responsesStarted: 0 },
+      { ...state, activeRequestId: "work" },
+      { ...state, completionAccepted: true },
+      { ...state, pendingFinalValidationRequestId: "work" },
+      { ...state, reservations: [{ ...reservation, reservedMicroUsd: 0 }] },
+      { ...state, reservations: [{ ...reservation, settledMicroUsd: 0 }] },
+      { ...state, reservations: [{ ...reservation, exactInputTokens: 11 }] },
+      { ...state, reservations: [{ ...reservation, requestSha256: undefined }] },
+      { ...state, reservations: [{ ...reservation, providerResponse: undefined }] },
+      { ...state, reservations: [{ ...reservation, usage: {
+        ...reservation.usage,
+        uncachedInputTokens: 0
+      } }] },
+      { ...state, reservations: [reservation, reservation] }
+    ];
+    for (const corrupted of corruptStates) {
+      expect(() => ReservationLedger.restore(corrupted, rateCard)).toThrow(GovernorError);
+    }
+  });
+
+  it("rejects changed rates even when the rate card version is unchanged", () => {
+    const ledger = new ReservationLedger(policy, rateCard);
+    const changed = createRateCard({
+      ...rateCard,
+      rates: { ...rateCard.rates, outputMicroUsdPerMillionTokens: 1_000_000 }
+    });
+    expect(() => ReservationLedger.restore(savedCopy(ledger), changed)).toThrow(
+      "does not match the configured rate card"
+    );
   });
 });
