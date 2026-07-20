@@ -79,9 +79,10 @@ patch leaves files unsaved for review.
 
 ## Run it
 
-These instructions describe the current source build. The Marketplace release
-is published separately; [build and install the VSIX](../docs/EXTENSION.md#install-the-packaged-build)
-to use this version.
+These instructions cover source version 0.2.0. The
+[Marketplace listing](https://marketplace.visualstudio.com/items?itemName=governor.token-governor-vscode)
+still provides 0.1.0. [Build and install the VSIX](../docs/EXTENSION.md#install-the-packaged-build)
+to use the features described here.
 
 1. Install the packaged VSIX and reload the editor.
 2. Open the Governor view: click the Governor icon in the Activity Bar, or run
